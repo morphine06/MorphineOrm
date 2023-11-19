@@ -1,0 +1,18 @@
+{
+  "name": "morphineorm",
+  "version": "1.0.0",
+  "description": "Orm for Nodejs",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "David Miglior",
+  "license": "ISC",
+  "dependencies": {
+    "dayjs": "^1.11.10",
+    "mysql2": "^3.6.3"
+  }
+}
