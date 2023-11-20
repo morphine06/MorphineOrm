@@ -1,12 +1,12 @@
 module.exports = function mymodel() {
 	return {
 		attributes: {
-			ki_id: {
+			id: {
 				type: "integer",
 				autoincrement: true,
 				primary: true,
 			},
-			ki_name: {
+			name: {
 				type: "string",
 				defaultsTo: "",
 				index: true,

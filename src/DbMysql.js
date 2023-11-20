@@ -13,7 +13,13 @@ const DbMysql = new (class {
 	}
 	async init(config) {
 		this.config = config;
-		const pool = mysql.createPool(this.config);
+		const pool = mysql.createPool({
+			host: this.config.host || "localhost",
+			user: this.config.user || "root",
+			password: this.config.password || "",
+			database: this.config.database || "test",
+			port: this.config.port || 3306,
+		});
 		this.connection = {
 			pool: pool,
 			query: async function (sql, sqlData = [], catchError = false) {
@@ -203,6 +209,7 @@ const DbMysql = new (class {
 			}
 		}
 	}
+
 	async synchronize(def) {
 		let exists = true;
 
@@ -210,7 +217,7 @@ const DbMysql = new (class {
 		if (rows1 && this.config.migrate == "recreate") await this.connection.query("DROP TABLE IF EXISTS " + def.tableName + "");
 		if (rows1 === null || this.config.migrate == "recreate") exists = false;
 
-		if (this.config.migrate == "alter") {
+		if (this.config.migrate == "alter" || this.config.migrate == "recreate") {
 			if (!exists) await this.createTable(def);
 			else await this.updateTable(def);
 
@@ -417,27 +424,25 @@ async function loadModels() {
 	// let where = "/models";
 	// if (Config.app.mode == "production") where = "/lib";
 	// console.log("process.cwd() + where", process.cwd() + where);
-	let files = globule.find(`${process.cwd()}${path.sep}models${path.sep}**${path.sep}*.model2.js`);
-	// console.warn(clc.yellow("@Info - Models availables :"));
+	let files = globule.find(`${process.cwd()}${path.sep}models${path.sep}**${path.sep}*.model.js`);
+	console.warn(clc.yellow("@Info - Models availables :"));
 	// console.log("d1b = ", new Date() - d);
 	// d = new Date();
 	for (let iFile = 0; iFile < files.length; iFile++) {
 		let file = files[iFile];
 		file = file.substring(0, file.length - 3);
-		// let def = require(file);
 		let { default: mymodel } = await import(file + ".js");
 		let def = mymodel();
-		// console.log("def", def);
 		if (def.useUpdatedAt === undefined) def.useUpdatedAt = true;
 		if (def.useCreatedAt === undefined) def.useCreatedAt = true;
 		if (def.useCreatedAt) def.attributes["createdAt"] = { type: "datetime", index: true };
 		if (def.useUpdatedAt) def.attributes["updatedAt"] = { type: "datetime", index: true };
 		def.modelname = path.basename(file);
-		def.modelname = def.modelname.substring(0, def.modelname.length - 7);
+		def.modelname = def.modelname.substring(0, def.modelname.indexOf(".model"));
 		def.debug = DbMysql.config.debug;
-		// global[def.modelname] =
 		if (!def.tableName) def.tableName = def.modelname;
 		DbMysql.models[def.modelname] = new DbTable(def, DbMysql);
+		module.exports[def.modelname] = DbMysql.models[def.modelname];
 		console.warn(`- ${def.modelname}`);
 	}
 	if (DbMysql.config.migrate == "alter") {

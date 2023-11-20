@@ -23,8 +23,9 @@ class DbTableExec {
 		this.logQuery = false;
 		this.catchErr = false;
 		this.iscount = false;
+		this.tabOriginalsPopulate = [];
 		// this.swallowerror = false;
-		this.joinModels = [{ modelname: this.modelname, fieldJoin: null, modelnameto: null, modelalias: "t1" }];
+		this.joinModels = [{ modelname: this.modelname, fieldJoin: null, modelnameto: null, modelalias: this.modelname }];
 		for (const [fieldName, field] of Object.entries(this.def.attributes)) {
 			if (field.primary) {
 				this.primary = fieldName;
@@ -165,9 +166,10 @@ class DbTableExec {
 		return this;
 	}
 	populate(fieldJoin) {
+		this.tabOriginalsPopulate.push(fieldJoin);
 		let tabFieldsJoins = fieldJoin.split(".");
 		let previousModelName = this.modelname;
-		let previousModelAlias = "t1";
+		let previousModelAlias = this.modelname;
 		let tabOrigin = [];
 		for (let iJoin = 0; iJoin < tabFieldsJoins.length; iJoin++) {
 			let join = tabFieldsJoins[iJoin];
@@ -185,7 +187,7 @@ class DbTableExec {
 				// console.warn(chalk.magenta(`It's better to indicate alias name '${modeltolink.alias}' rather field name ${join} to populate`));
 				join = modeltolink.alias;
 			}
-			let modelalias = "t1";
+			let modelalias = this.modelname;
 			tabOrigin.push(join);
 			if (!this.tabAlreadyIncluded[modeltolink.model + "__" + tabOrigin.join("_")]) {
 				modelalias = tabOrigin.join("__"); //+ modeltolink.alias
@@ -294,7 +296,28 @@ class DbTableExec {
 		}
 		return query;
 	}
-	_createInsertQuery() {
+
+	async _createOrUpdateJoinedData() {
+		// create first the models to join
+		for (const [key, val] of Object.entries(this.def.attributes)) {
+			if (val.model && this.data[val.alias] && typeof this.data[val.alias] == "object" && this.tabOriginalsPopulate.indexOf(val.alias) >= 0) {
+				// console.log("data to insert into " + val.model, this.data[val.alias]);
+				let modelJoin = this.DbMysql.models[val.model];
+				let modelJoinData = this.data[val.alias];
+				let createJoin = false;
+				if (modelJoinData[modelJoin.primary]) {
+					let f = await (new DbTableExec(modelJoin)).findone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData).exec();
+					if (f) createJoin = false;
+				} else createJoin = true;
+				if (createJoin) {
+					let c = await (new DbTableExec(modelJoin)).create(modelJoinData).exec();
+					this.data[key] = c[modelJoin.primary];
+				}
+			}
+		}
+	}
+
+	async _createInsertQuery() {
 		let fields = [],
 			vals = [];
 		// console.log("this.data", this.data);
@@ -523,10 +546,12 @@ class DbTableExec {
 				break;
 			case "INSERT":
 				this._preTreatment();
-				query = this._createInsertQuery();
+				await this._createOrUpdateJoinedData();
+				query = await this._createInsertQuery();
 				break;
 			case "UPDATE":
 				this._preTreatment();
+				await this._createOrUpdateJoinedData();
 				query = this._createUpdateQuery();
 				break;
 			case "DELETE":
@@ -600,13 +625,20 @@ class DbTableExec {
 				let rows2 = await this.table.find(this.original_where, this.original_whereData).exec();
 				if (this.onlyOne) return rows2[0];
 				return rows2;
-			} else {
+			}
+			if (this.command == "INSERT") {
 				let ftemp = {};
-				ftemp[this.primary] = res;
+				ftemp[this.modelname + "." + this.primary] = res;
 				if (!res) {
-					ftemp[this.primary] = this.data[this.primary];
+					ftemp[this.modelname + "." + this.primary] = this.data[this.primary];
 				}
-				let rows2 = await this.table.findone(ftemp).exec();
+				// console.log('this.tabOriginalsPopulate', this.tabOriginalsPopulate);
+				let tableToExec = this.table.findone(ftemp);
+				for (let iOp = 0; iOp < this.tabOriginalsPopulate.length; iOp++) {
+					const fieldJoin = this.tabOriginalsPopulate[iOp];
+					tableToExec.populate(fieldJoin);
+				}
+				let rows2 = await tableToExec.exec();
 				return rows2;
 			}
 		} else return res;

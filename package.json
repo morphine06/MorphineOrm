@@ -1,5 +1,5 @@
 {
-  "name": "morphineorm",
+  "name": "morphine-orm",
   "version": "1.0.0",
   "description": "Orm for Nodejs",
   "main": "index.js",
@@ -12,7 +12,10 @@
   "author": "David Miglior",
   "license": "ISC",
   "dependencies": {
+    "cli-color": "^2.0.3",
     "dayjs": "^1.11.10",
+    "dotenv": "^16.3.1",
+    "globule": "^1.3.4",
     "mysql2": "^3.6.3"
   }
 }
