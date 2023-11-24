@@ -1,9 +1,9 @@
 require("dotenv").config({ path: `.env.local` });
 
-const { DbMysql, Models, loadModels } = require("./index.js");
+const { MorphineDb, Models, loadModels } = require("./index.js");
 
 async function initApp() {
-    await DbMysql.init({
+    await MorphineDb.init({
         host: process.env.DBHOST,
         user: process.env.DBUSER,
         password: process.env.DBPASSWORD,

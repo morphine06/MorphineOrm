@@ -4,10 +4,10 @@ const mysql = require("mysql2/promise");
 const clc = require("cli-color");
 
 const globule = require("globule");
-const DbTable = require("./DbTable.js");
+const MorphineTable = require("./MorphineTable.js");
 // const { Config } = require("./Config.js");
 
-const DbMysql = new (class {
+const MorphineDb = new (class {
 	constructor() {
 		this.models = {};
 	}
@@ -45,6 +45,10 @@ const DbMysql = new (class {
 				}
 			},
 		};
+	}
+
+	async query(sql, sqlData = [], catchError = false) {
+		return await this.connection.query(sql, sqlData, catchError);
 	}
 
 	async constraints(model) {
@@ -431,7 +435,7 @@ async function loadModels() {
 	for (let iFile = 0; iFile < files.length; iFile++) {
 		let file = files[iFile];
 		file = file.substring(0, file.length - 3);
-		let { default: mymodel } = await import(file + ".js");
+		let { default: mymodel } = await import(`file://${file}.js`);
 		let def = mymodel();
 		if (def.useUpdatedAt === undefined) def.useUpdatedAt = true;
 		if (def.useCreatedAt === undefined) def.useCreatedAt = true;
@@ -439,31 +443,31 @@ async function loadModels() {
 		if (def.useUpdatedAt) def.attributes["updatedAt"] = { type: "datetime", index: true };
 		def.modelname = path.basename(file);
 		def.modelname = def.modelname.substring(0, def.modelname.indexOf(".model"));
-		def.debug = DbMysql.config.debug;
+		def.debug = MorphineDb.config.debug;
 		if (!def.tableName) def.tableName = def.modelname;
-		DbMysql.models[def.modelname] = new DbTable(def, DbMysql);
-		module.exports[def.modelname] = DbMysql.models[def.modelname];
+		MorphineDb.models[def.modelname] = new MorphineTable(def, MorphineDb);
+		module.exports[def.modelname] = MorphineDb.models[def.modelname];
 		console.warn(`- ${def.modelname}`);
 	}
-	if (DbMysql.config.migrate == "alter") {
+	if (MorphineDb.config.migrate == "alter") {
 		// console.log("d2b = ", new Date() - d);
 		// d = new Date();
 
-		for (const model of Object.values(DbMysql.models)) {
-			await DbMysql.synchronize(model.def);
+		for (const model of Object.values(MorphineDb.models)) {
+			await MorphineDb.synchronize(model.def);
 		}
 		// console.log("d3b = ", new Date() - d);
 		// d = new Date();
 
 		// warning, je désactive les contraintes car trop long à calculer
-		// for (const model of Object.values(DbMysql.models)) {
-		// 	await DbMysql.constraints(model);
+		// for (const model of Object.values(MorphineDb.models)) {
+		// 	await MorphineDb.constraints(model);
 		// }
 
 		// console.log("d4b = ", new Date() - d);
 		// d = new Date();
 	}
-	// console.log("DbMysql.models", DbMysql.models);
+	// console.log("MorphineDb.models", MorphineDb.models);
 }
 
 const Migration = new (class {
@@ -473,5 +477,5 @@ const Migration = new (class {
 	exec() {}
 })();
 
-const Models = DbMysql.models;
-module.exports = { DbMysql, Model, Models, Migration, loadModels };
+const Models = MorphineDb.models;
+module.exports = { MorphineDb, Model, Models, Migration, loadModels };

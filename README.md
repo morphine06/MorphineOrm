@@ -10,6 +10,28 @@
 - [x] Synchronize the database with the models that you define (columns, indexes, tables).
 - [x] Easy to do your own SQL queries.
 
+
+## Quick look
+
+```js
+// create a new record
+const dog = await Dogs.create({
+	name: "Rex",
+	birth: "2019-10-06",
+}).exec();
+
+// find some records
+let dogs = Dogs.find(
+	"birth>? AND name like ? order by name", 
+	["2015-01-01", "Re%"]
+	).exec();
+
+// find one record and populate the attributes of the associated model
+const dog = await Dogs.findone(1).populate('kind').exec();
+
+```
+
+
 ## Installation
 
 - Install the npm package:
@@ -96,7 +118,9 @@ Try to initialize the ORM in the `app.js` file of your application **before requ
 
 ```js
 // /app.js
-await DbMysql.init({
+import { MorphineDb, loadModels } from "morphine-orm";
+
+await MorphineDb.init({
     host: process.env.DBHOST,
     user: process.env.DBUSER,
     password: process.env.DBPASSWORD,
@@ -309,3 +333,120 @@ const dogs2 = await Dogs.find().populateAll().exec();
 
 ### 6. Update one record
 
+```js
+let dogRexy1 = Dogs.updateone(1, { name: "Rexy" }).exec();
+let dogRexy2 = Dogs.updateone({ name: "Roxy" }, { name: "Rexy" }).exec();
+let dogRexy3 = Dogs.updateone("id=?",[1], { name: "Rexy" }).exec();
+
+// dogRexy1 = dogRexy2 = dogRexy3 = {
+//     id: 1,
+//     name: "Rexy",
+//     birth: "2019-10-06",
+//     kindId: 1,
+// }
+
+let dogRexy = Dogs.updateone(1, { 
+	name: "Rexy",
+	kind: {
+		id: 1,
+		name: "Labrador 2",
+	}
+}).populate('kind').exec();
+
+// dogRexy = {
+//     id: 1,
+//     name: "Rexy",
+//     birth: "2019-10-06",
+//     kindId: 1,
+//     kind: {
+//         id: 1,
+//         name: "Labrador 2",
+//     },
+// }
+
+```
+
+### 7. Update many records
+
+```js
+Dogs.update({ kindId: 1 }, { kindId: 2 }).exec();
+Dogs.update("kindId=?",[1], { kindId: 2 }).exec();
+```
+
+### 8. Delete one record
+
+```js
+Dogs.deleteone({ id: 1 }).exec();
+Dogs.deleteone("id=?",[1]).exec();
+```
+
+### 9. Delete many records
+
+```js
+Dogs.delete({ kindId: 1 }).exec();
+Dogs.delete("kindId=?",[1]).exec();
+```
+
+
+
+### 10. Do your own SQL queries
+
+```js
+import { MorphineDb } from "morphine-orm";
+
+const dogs = await MorphineDb.query("SELECT * FROM Dogs WHERE name=? && kindId=?",["Roxy", 1]).exec();
+```
+
+### 11. Some other methods
+
+```js
+
+const dog = await Dogs.createEmpty();
+// dog = {
+//     id: 0,
+//     name: "",
+//     birth: "0000-00-00",
+//     kindId: 0,
+// }
+
+
+// count the number of records (sql queries are optimized)
+const count = await Dogs.count().exec();
+const count = await Dogs.count({ kindId: 1 }).exec();
+const count = await Dogs.count("kindId=?",[1]).exec();
+
+// check if a record exists
+const exists = await Dogs.exists(1).exec();
+const exists = await Dogs.exists({ id: 1 }).exec();
+const exists = await Dogs.exists("id=?",[1]).exec();
+
+// get the attributes of a model
+const kindsAttributes = Kinds.getAttributes();
+// kindsAttributes = {
+//     id: {
+//         type: "integer",
+//         autoincrement: true,
+//         primary: true,
+//     },
+//     name: {
+//         type: "string",
+//         defaultsTo: "",
+//         index: true,
+//     },
+// }
+
+const kindsAttributesEntries = Kinds.getAttributesEntries();
+// kindsAttributesEntries = [
+//     ["id", {
+//         type: "integer",
+//         autoincrement: true,
+//         primary: true,
+//     }],
+//     ["name", {
+//         type: "string",
+//         defaultsTo: "",
+//         index: true,
+//     }],
+// ]
+
+```

@@ -1,2 +1,2 @@
-const DbMysql = require("./src/DbMysql.js");
-module.exports = DbMysql;
+const MorphineDb = require("./src/MorphineDb.js");
+module.exports = MorphineDb;

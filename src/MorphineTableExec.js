@@ -1,9 +1,9 @@
 const dayjs = require("dayjs");
 
-class DbTableExec {
+class MorphineTableExec {
 	constructor(table) {
 		this.table = table;
-		this.DbMysql = table.DbMysql;
+		this.MorphineDb = table.MorphineDb;
 		this.connection = table.connection;
 		this.def = table.def;
 		this.modelname = this.def.modelname;
@@ -111,11 +111,17 @@ class DbTableExec {
 		this.where = where;
 		return this;
 	}
+	truncate() {
+		this.command = "TRUNCATE";
+		return this;
+	}
+
+
 	_searchModelFromFieldName(fieldJoin, fromModelName) {
 		let f = null,
 			n = "",
 			isNotAlias = false;
-		for (const [fieldName, field] of Object.entries(this.DbMysql.models[fromModelName].def.attributes)) {
+		for (const [fieldName, field] of Object.entries(this.MorphineDb.models[fromModelName].def.attributes)) {
 			if (field.model && (field.alias == fieldJoin || fieldName == fieldJoin)) {
 				f = field;
 				n = fieldName;
@@ -157,7 +163,7 @@ class DbTableExec {
 					me.populate(origins + defField.alias);
 					// console.log("origins + defField.alias", origins + defField.alias);
 					level++;
-					if (level < maxlevel) populateThis(me.DbMysql.models[defField.model], origins + defField.alias + ".", level);
+					if (level < maxlevel) populateThis(me.MorphineDb.models[defField.model], origins + defField.alias + ".", level);
 				}
 			}
 		}
@@ -252,7 +258,7 @@ class DbTableExec {
 	_createSelect() {
 		let tabSelect = [];
 		this.joinModels.forEach((model, num) => {
-			for (const [fieldName] of Object.entries(this.DbMysql.models[model.modelname].def.attributes)) {
+			for (const [fieldName] of Object.entries(this.MorphineDb.models[model.modelname].def.attributes)) {
 				let as = "";
 				if (model.modelnameto) as = " AS " + model.modelalias + "_" + model.fieldJoin + "_" + fieldName;
 				tabSelect.push(model.modelalias + "." + fieldName + as);
@@ -264,17 +270,17 @@ class DbTableExec {
 	_createJoin() {
 		let tabJoin = [];
 		this.joinModels.forEach((model, num) => {
-			if (!model.modelnameto) tabJoin.push(this.DbMysql.models[model.modelname].def.tableName + " " + model.modelalias);
+			if (!model.modelnameto) tabJoin.push(this.MorphineDb.models[model.modelname].def.tableName + " " + model.modelalias);
 			else
 				tabJoin.push(
 					"LEFT JOIN " +
-					this.DbMysql.models[model.modelname].def.tableName +
+					this.MorphineDb.models[model.modelname].def.tableName +
 					" " +
 					model.modelalias +
 					" ON " +
 					model.modelalias +
 					"." +
-					this.DbMysql.models[model.modelname].primary +
+					this.MorphineDb.models[model.modelname].primary +
 					"=" +
 					model.modelaliasto +
 					"." +
@@ -302,15 +308,20 @@ class DbTableExec {
 		for (const [key, val] of Object.entries(this.def.attributes)) {
 			if (val.model && this.data[val.alias] && typeof this.data[val.alias] == "object" && this.tabOriginalsPopulate.indexOf(val.alias) >= 0) {
 				// console.log("data to insert into " + val.model, this.data[val.alias]);
-				let modelJoin = this.DbMysql.models[val.model];
+				let modelJoin = this.MorphineDb.models[val.model];
 				let modelJoinData = this.data[val.alias];
-				let createJoin = false;
+				let createJoin = false, modifyJoin = false;
 				if (modelJoinData[modelJoin.primary]) {
-					let f = await (new DbTableExec(modelJoin)).findone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData).exec();
-					if (f) createJoin = false;
+					let f = await (new MorphineTableExec(modelJoin)).findone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData).exec();
+					if (f) modifyJoin = f;
+					else createJoin = true;
 				} else createJoin = true;
 				if (createJoin) {
-					let c = await (new DbTableExec(modelJoin)).create(modelJoinData).exec();
+					let c = await (new MorphineTableExec(modelJoin)).create(modelJoinData).exec();
+					this.data[key] = c[modelJoin.primary];
+				}
+				if (modifyJoin) {
+					let c = await (new MorphineTableExec(modelJoin)).updateone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData).exec();
 					this.data[key] = c[modelJoin.primary];
 				}
 			}
@@ -373,6 +384,10 @@ class DbTableExec {
 	// }
 	_createDestroyQuery() {
 		let query = "DELETE FROM " + this.def.tableName + " WHERE " + this._createWhere();
+		return query;
+	}
+	_createTruncateQuery() {
+		let query = "TRUNCATE " + this.def.tableName;
 		return query;
 	}
 	_preTreatment() {
@@ -447,8 +462,8 @@ class DbTableExec {
 				if (model.modelnameto) {
 					let obj = {};
 
-					for (const [fieldName, field] of Object.entries(this.DbMysql.models[model.modelname].def.attributes)) {
-						// let f = DbMysql.models[model.modelname].def.tableName+'_'+model.fieldJoin+'_'+fieldName ;
+					for (const [fieldName, field] of Object.entries(this.MorphineDb.models[model.modelname].def.attributes)) {
+						// let f = MorphineDb.models[model.modelname].def.tableName+'_'+model.fieldJoin+'_'+fieldName ;
 						let f = model.modelalias + "_" + model.fieldJoin + "_" + fieldName;
 						if (row.hasOwnProperty(f)) {
 							if (field.type == "json") {
@@ -467,7 +482,7 @@ class DbTableExec {
 					if (model.fieldJoinName && model.modelaliasto == "t1") {
 						row[model.fieldJoinName] = obj;
 					} else {
-						if (!obj[this.DbMysql.models[model.modelname].primary]) {
+						if (!obj[this.MorphineDb.models[model.modelname].primary]) {
 							obj = null;
 						}
 						let tabFieldsJoins = model.origin.split(".");
@@ -505,6 +520,9 @@ class DbTableExec {
 				if (this.data.createdAtForced) this.data.createdAt = this.data.createdAtForced;
 				if (this.data.updatedAtForced) this.data.updatedAt = this.data.updatedAtForced;
 				if (this.def.beforeCreate) fn = this.def.beforeCreate;
+				break;
+			case "TRUNCATE":
+				if (this.def.beforeTruncate) fn = this.def.beforeTruncate;
 				break;
 			// case 'REPLACE':
 			// if (this.def.beforeCreate) fn = this.def.beforeCreate ;
@@ -557,6 +575,9 @@ class DbTableExec {
 			case "DELETE":
 				query = this._createDestroyQuery();
 				break;
+			case "TRUNCATE":
+				query = this._createTruncateQuery();
+				break;
 			default:
 				query = this._createSelectQuery();
 		}
@@ -588,6 +609,9 @@ class DbTableExec {
 					break;
 				case "INSERT":
 					res = null;
+					break;
+				case "TRUNCATE":
+					res = [];
 					break;
 				default:
 					res = {};
@@ -645,4 +669,4 @@ class DbTableExec {
 	}
 }
 
-module.exports = DbTableExec;
+module.exports = MorphineTableExec;
