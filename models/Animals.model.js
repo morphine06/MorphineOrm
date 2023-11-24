@@ -17,8 +17,8 @@ module.exports = function mymodel() {
 				index: true,
 			},
 			kindId: {
-				model: "Kinds",
-				alias: "kind",
+				model: "Breeds",
+				alias: "breed",
 			},
 			// size: {
 			// 	type: "string",

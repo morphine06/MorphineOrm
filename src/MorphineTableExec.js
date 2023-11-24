@@ -172,6 +172,7 @@ class MorphineTableExec {
 		return this;
 	}
 	populate(fieldJoin) {
+		// console.log("🚀 ~ file: MorphineTableExec.js:175 ~ MorphineTableExec ~ populate ~ fieldJoin:", fieldJoin)
 		this.tabOriginalsPopulate.push(fieldJoin);
 		let tabFieldsJoins = fieldJoin.split(".");
 		let previousModelName = this.modelname;
@@ -232,7 +233,7 @@ class MorphineTableExec {
 		if (!this.where) {
 			where = "1=1";
 		} else if (Number.isInteger(this.where)) {
-			where += this.primary + "=?";
+			where += this.modelname + "." + this.primary + "=?";
 			this.whereData.push(this.where);
 		} else if (typeof this.where === "string") {
 			where = this.where;
@@ -248,7 +249,8 @@ class MorphineTableExec {
 		} else {
 			where += "1";
 			Object.entries(this.where).forEach(([key, val], index) => {
-				where += " && " + key + "=?";
+				if (key.indexOf(".") < 0) key = this.modelname + "." + key;
+				where += " AND " + key + "=?";
 				this.whereData.push(val);
 			});
 		}
@@ -305,6 +307,7 @@ class MorphineTableExec {
 
 	async _createOrUpdateJoinedData() {
 		// create first the models to join
+		console.log("ici");
 		for (const [key, val] of Object.entries(this.def.attributes)) {
 			if (val.model && this.data[val.alias] && typeof this.data[val.alias] == "object" && this.tabOriginalsPopulate.indexOf(val.alias) >= 0) {
 				// console.log("data to insert into " + val.model, this.data[val.alias]);
@@ -316,12 +319,26 @@ class MorphineTableExec {
 					if (f) modifyJoin = f;
 					else createJoin = true;
 				} else createJoin = true;
+				let tabNewJoins = [];
+				for (let iJoined = 0; iJoined < this.tabOriginalsPopulate.length; iJoined++) {
+					const toPopulate = this.tabOriginalsPopulate[iJoined];
+					if (toPopulate.indexOf(val.alias + ".") >= 0) {
+						// mt.populate(toPopulate.replace(val.alias + ".", ""));
+						tabNewJoins.push(toPopulate.replace(val.alias + ".", ""));
+					}
+				}
+
 				if (createJoin) {
-					let c = await (new MorphineTableExec(modelJoin)).create(modelJoinData).exec();
+					// console.log('this.tabOriginalsPopulate', this.tabOriginalsPopulate);
+					let mt = (new MorphineTableExec(modelJoin)).create(modelJoinData);
+					tabNewJoins.map((toPopulate) => mt.populate(toPopulate));
+					let c = await mt.exec();
 					this.data[key] = c[modelJoin.primary];
 				}
 				if (modifyJoin) {
-					let c = await (new MorphineTableExec(modelJoin)).updateone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData).exec();
+					let mt = (new MorphineTableExec(modelJoin)).updateone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData)
+					tabNewJoins.map((toPopulate) => mt.populate(toPopulate));
+					let c = await mt.exec();
 					this.data[key] = c[modelJoin.primary];
 				}
 			}
@@ -383,11 +400,13 @@ class MorphineTableExec {
 	// 	return query;
 	// }
 	_createDestroyQuery() {
-		let query = "DELETE FROM " + this.def.tableName + " WHERE " + this._createWhere();
+		let query = `DELETE FROM ${this.def.tableName} WHERE ${this._createWhere()}`;
 		return query;
 	}
 	_createTruncateQuery() {
-		let query = "TRUNCATE " + this.def.tableName;
+		let query = "";
+		if (this.MorphineDb.config.type == "sqlite3") query = `DELETE FROM ${this.def.tableName}; delete from sqlite_sequence where name='${this.def.tableName}'; VACUUM;`;
+		else query = `TRUNCATE ${this.def.tableName}`;
 		return query;
 	}
 	_preTreatment() {
@@ -594,6 +613,7 @@ class MorphineTableExec {
 		// }
 	}
 	async postTreatmentMain(rows, returnCompleteRow) {
+		// console.log("🚀 ~ file: MorphineTableExec.js:597 ~ postTreatmentMain ~ rows:", rows)
 		let res;
 		if (!rows) {
 			res = {};
@@ -629,9 +649,17 @@ class MorphineTableExec {
 			case "DELETE":
 				res = rows.affectedRows;
 				break;
+			case "TRUNCATE":
+				res = rows.affectedRows;
+				break;
 			case "INSERT":
-				res = rows.insertId;
-				if (res) this.data[this.primary] = rows.insertId;
+				if (this.MorphineDb.config.type == "sqlite3") {
+					let lastinsert = await this.MorphineDb.query("SELECT last_insert_rowid()");
+					res = lastinsert[0]["last_insert_rowid()"];
+				} else {
+					res = rows.insertId;
+				}
+				if (res) this.data[this.primary] = res;
 				break;
 			default:
 				if (this.iscount) res = rows[0].cmpt;

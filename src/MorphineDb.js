@@ -1,6 +1,4 @@
 const path = require("path");
-const mysql = require("mysql2/promise");
-
 const clc = require("cli-color");
 
 const globule = require("globule");
@@ -13,38 +11,66 @@ const MorphineDb = new (class {
 	}
 	async init(config) {
 		this.config = config;
-		const pool = mysql.createPool({
-			host: this.config.host || "localhost",
-			user: this.config.user || "root",
-			password: this.config.password || "",
-			database: this.config.database || "test",
-			port: this.config.port || 3306,
-		});
-		this.connection = {
-			pool: pool,
-			query: async function (sql, sqlData = [], catchError = false) {
-				let connection;
-				try {
-					connection = await this.pool.getConnection();
-				} catch (error) {
-					console.warn("connection-error", error);
-					return null;
-				}
-				try {
-					let results = await connection.query(sql, sqlData);
-					// console.log("sql, sqlData", sql, sqlData); //, results
-					connection.release();
-					return results[0];
-				} catch (error) {
-					connection.release();
-					if (catchError) throw error;
-					console.warn(clc.red("sql-error"), error, sql, sqlData);
-					return null;
-					// } finally {
-					// 	connection.release(); // always put connection back in pool after last query
-				}
-			},
-		};
+		if (!this.config.migrate) this.config.migrate = "safe";
+		if (!this.config.debug) this.config.debug = false;
+		if (!this.config.type) this.config.type = "mysql2";
+
+		if (this.config.type == "sqlite3") {
+			const sqlite3 = require("sqlite3").verbose();
+			const db = new sqlite3.Database(this.config.database + ".sqlite");
+			this.connection = {
+				db: db,
+				query: async function (sql, sqlData = [], catchError = false) {
+					return new Promise((resolve, reject) => {
+						this.db.all(sql, sqlData, function (err, rows) {
+							// console.log("🚀 ~ file: MorphineDb.js:61 ~ rows:", sql, sqlData, rows)
+							if (err) {
+								if (catchError) reject(err);
+								else {
+									console.warn(clc.red("sql-error"), err, sql, sqlData);
+									resolve(null);
+								}
+							} else resolve(rows);
+						});
+					});
+				},
+			};
+		} else {
+			const mysql = require("mysql2/promise");
+			const pool = mysql.createPool({
+				...config,
+				host: this.config.host || "localhost",
+				user: this.config.user || "root",
+				password: this.config.password || "",
+				database: this.config.database || "test",
+				port: this.config.port || 3306,
+			});
+			this.connection = {
+				pool: pool,
+				query: async function (sql, sqlData = [], catchError = false) {
+					let connection;
+					try {
+						connection = await this.pool.getConnection();
+					} catch (error) {
+						console.warn("connection-error", error);
+						return null;
+					}
+					try {
+						let results = await connection.query(sql, sqlData);
+						// console.log("sql, sqlData", sql, sqlData); //, results
+						connection.release();
+						return results[0];
+					} catch (error) {
+						connection.release();
+						if (catchError) throw error;
+						console.warn(clc.red("sql-error"), error, sql, sqlData);
+						return null;
+						// } finally {
+						// 	connection.release(); // always put connection back in pool after last query
+					}
+				},
+			};
+		}
 	}
 
 	async query(sql, sqlData = [], catchError = false) {
@@ -125,12 +151,15 @@ const MorphineDb = new (class {
 				);
 			}
 		}
-		let q = "CREATE TABLE IF NOT EXISTS " + def.tableName + " (" + what.join(", ") + ")";
-		console.warn("q", q);
-		await this.connection.query(q);
+		let q = `CREATE TABLE IF NOT EXISTS ${def.tableName} (${what.join(", ")})`;
+		console.warn(clc.yellow("info:"), q);
+		await this.connection.query(q, [], true);
 	}
 	async updateTable(def) {
-		let describe = await this.connection.query("DESCRIBE " + def.tableName + "");
+		let describe;
+		if (this.config.type == "sqlite3") describe = await this.connection.query(`PRAGMA table_info(${def.tableName})`);
+		else describe = await this.connection.query(`DESCRIBE ${def.tableName}`);
+
 		for (const [fieldName, field] of Object.entries(def.attributes)) {
 			let type1 = null;
 			if (field.model) {
@@ -149,11 +178,20 @@ const MorphineDb = new (class {
 			for (let iRow = 0; iRow < describe.length; iRow++) {
 				const row = describe[iRow];
 				// console.log("row", row);
-				if (row.Field == fieldName) {
-					if (field.notnull === false && row.Null == "NO") nullChanged = true;
-					if (field.notnull !== false && row.Null == "YES") nullChanged = true;
-					type2 = row.Type;
-					def2 = row.Default;
+				if (this.config.type == "sqlite3") {
+					if (row.name == fieldName) {
+						if (field.notnull === false && row.notnull == 1) nullChanged = true;
+						if (field.notnull !== false && row.notnull == 0) nullChanged = true;
+						type2 = row.type;
+						def2 = row.dflt_value;
+					}
+				} else {
+					if (row.Field == fieldName) {
+						if (field.notnull === false && row.Null == "NO") nullChanged = true;
+						if (field.notnull !== false && row.Null == "YES") nullChanged = true;
+						type2 = row.Type;
+						def2 = row.Default;
+					}
 				}
 			}
 			// console.log("nullChanged", nullChanged, def.tableName, fieldName);
@@ -175,7 +213,7 @@ const MorphineDb = new (class {
 					this._getNotnull(field) +
 					this._getIndex(field) +
 					this._getDefault(field, fieldName);
-				console.warn("q", q);
+				console.warn(clc.yellow("info:"), q);
 				await this.connection.query(q);
 			} else if (
 				type1 &&
@@ -193,8 +231,12 @@ const MorphineDb = new (class {
 					this._ormTypeToDatabaseType(field.type, field.length) +
 					this._getNotnull(field) +
 					this._getDefault(field, fieldName);
-				console.warn("q", q);
-				await this.connection.query(q);
+				if (this.config.type == "sqlite3") {
+					console.warn(clc.yellow(`info: Field ${def.tableName}.${fieldName} has changed but impossible to modify field in sqlite3`), q);
+				} else {
+					console.warn(clc.yellow("info:"), q);
+					await this.connection.query(q);
+				}
 			} else if (nullChanged && !field.model) {
 				let q =
 					"ALTER TABLE " +
@@ -208,54 +250,68 @@ const MorphineDb = new (class {
 					this._getNotnull(field) +
 					this._getIndex(field) +
 					this._getDefault(field, fieldName);
-				console.warn("q", q);
+				if (this.config.type == "sqlite3") {
+					console.warn(clc.yellow(`info: Field ${def.tableName}.${fieldName} has changed but impossible to modify field in sqlite3`), q);
+				} else {
+					console.warn(clc.yellow("info:"), q);
+					await this.connection.query(q);
+				}
+			}
+		}
+
+	}
+	async updateIndexes(def) {
+		let rows2;
+		if (this.config.type == "sqlite3") rows2 = await this.connection.query(`SELECT * from sqlite_master WHERE type='index' AND tbl_name='${def.tableName}'`);
+		else rows2 = await this.connection.query(`SHOW INDEX FROM ${def.tableName}`);
+		for (const [fieldName, field] of Object.entries(def.attributes)) {
+			let createIndex = false;
+			//let createUnique = false;
+			if (field.model || field.index) {
+				createIndex = true;
+				for (let iRows = 0; iRows < rows2.length; iRows++) {
+					const row2 = rows2[iRows];
+					if (this.config.type == "sqlite3" && row2.name == `${def.tableName}_${fieldName}_idx`) createIndex = false;
+					else if (row2.Column_name == fieldName) createIndex = false;
+				}
+			}
+			// if (field.unique) {
+			// 	createUnique = true;
+			// 	for (let iRows = 0; iRows < rows2.length; iRows++) {
+			// 		const row2 = rows2[iRows];
+			// 		if (row2.Column_name == fieldName) createIndex = false;
+			// 	}
+			// }
+
+			if (createIndex) {
+				let q = "";
+				if (this.config.type == "sqlite3") q = `CREATE INDEX ${def.tableName}_${fieldName}_idx ON ${def.tableName} (${fieldName})`;
+				else q = `ALTER TABLE ${def.tableName} ADD INDEX (${fieldName})`;
+				console.warn(clc.yellow("info:"), q);
 				await this.connection.query(q);
 			}
+			// if (createUnique) {
+			// 	let q = "ALTER TABLE " + def.tableName + " ADD UNIQUE (" + fieldName + ")";
+			// 	console.warn("q", q);
+			// 	await this.connection.query(q);
+			// }
 		}
 	}
 
 	async synchronize(def) {
 		let exists = true;
-
-		let rows1 = await this.connection.query(`SELECT * FROM ${def.tableName} LIMIT 0,1`);
-		if (rows1 && this.config.migrate == "recreate") await this.connection.query("DROP TABLE IF EXISTS " + def.tableName + "");
-		if (rows1 === null || this.config.migrate == "recreate") exists = false;
+		try {
+			let rows1 = await this.connection.query(`SELECT * FROM ${def.tableName} LIMIT 0,1`, [], true);
+			if (rows1 && this.config.migrate == "recreate") await this.connection.query(`DROP TABLE IF EXISTS ${def.tableName}`);
+			if (rows1 === null || this.config.migrate == "recreate") exists = false;
+		} catch (error) {
+			exists = false;
+		}
 
 		if (this.config.migrate == "alter" || this.config.migrate == "recreate") {
 			if (!exists) await this.createTable(def);
 			else await this.updateTable(def);
-
-			let rows2 = await this.connection.query("SHOW INDEX FROM " + def.tableName + "");
-			for (const [fieldName, field] of Object.entries(def.attributes)) {
-				let createIndex = false;
-				//let createUnique = false;
-				if (field.model || field.index) {
-					createIndex = true;
-					for (let iRows = 0; iRows < rows2.length; iRows++) {
-						const row2 = rows2[iRows];
-						if (row2.Column_name == fieldName) createIndex = false;
-					}
-				}
-				// if (field.unique) {
-				// 	createUnique = true;
-				// 	for (let iRows = 0; iRows < rows2.length; iRows++) {
-				// 		const row2 = rows2[iRows];
-				// 		if (row2.Column_name == fieldName) createIndex = false;
-				// 	}
-				// }
-
-				if (createIndex) {
-					let q = "ALTER TABLE " + def.tableName + " ADD INDEX (" + fieldName + ")";
-					console.warn("q", q);
-					await this.connection.query(q);
-				}
-				// if (createUnique) {
-				// 	let q = "ALTER TABLE " + def.tableName + " ADD UNIQUE (" + fieldName + ")";
-				// 	console.warn("q", q);
-				// 	await this.connection.query(q);
-
-				// }
-			}
+			await this.updateIndexes(def);
 		}
 	}
 	_ormTypeToDatabaseType(ormtype, length, info) {
@@ -265,7 +321,8 @@ const MorphineDb = new (class {
 		let res = "";
 		if (ormtype == "int" || ormtype == "integer") {
 			if (!length) length = 11;
-			res = "INT(" + length + ")";
+			if (this.config.type == "sqlite3") res = "INTEGER";
+			else res = "INT(" + length + ")";
 			typeJS = "number";
 		} else if (ormtype == "tinyint") {
 			if (!length) length = 4;
@@ -368,7 +425,10 @@ const MorphineDb = new (class {
 	_getIndex(field) {
 		let res = "";
 		if (field.primary) res += " PRIMARY KEY";
-		if (field.autoincrement) res += " AUTO_INCREMENT";
+		if (field.autoincrement) {
+			if (this.config.type == "sqlite3") res += " AUTOINCREMENT";
+			else res += " AUTO_INCREMENT";
+		}
 		return res;
 	}
 	_getNotnull(field) {
@@ -377,6 +437,7 @@ const MorphineDb = new (class {
 		// else res = " NULL";
 		if (field.notnull === false) res = " NULL";
 		else res = " NOT NULL";
+		// if (this.config.type == "sqlite3") res = "";
 		return res;
 	}
 	_getDefault(field, fieldName = "") {

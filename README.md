@@ -1,14 +1,15 @@
 # MorphineOrm
 
-## Features
+## Features and philosophy
 
-- [x] Original ! No other ORM is like MorphineOrm.
-- [x] Really fast !
+- [x] Do you have problems with your migration tools in other ORM ? Me too ! That's why MorphineOrm is designed to sync models and tables in a very simple way.
 - [x] Support MySQL, MariaDB, PostgreSQL, CockroachDB, SQLite, Microsoft SQL Server and Oracle.
+- [x] Really fast !
 - [x] Support associations one-to-one, one-to-many. Easy to do many-to-one or many-to-many associations (but not automatized... it's a developper choice).
 - [x] Easy to learn, easy to use.
 - [x] Synchronize the database with the models that you define (columns, indexes, tables).
 - [x] Easy to do your own SQL queries.
+- [x] Original ! No other ORM is like MorphineOrm.
 
 
 ## Quick look
@@ -127,6 +128,7 @@ await MorphineDb.init({
     database: process.env.DBNAME,
     migrate: "alter", // alter, recreate, safe
     port: 3306,
+	dateStrings: true,
 });
 await loadModels("./models");
 ```
@@ -476,13 +478,26 @@ const kindsAttributesEntries = Kinds.getAttributesEntries();
 
 ```
 
+## Many-to-many associations
+
+```js
+// /models/Dogs.model.js
+```
+
+## One-to-many associations
+
+```js
+// /models/Dogs.model.js
+```
+
+
 
 ## API
 
 
 ### MorphineDb.init(options)
 
-Initialize the ORM.
+Initialize the ORM. options is the object with the same properties as the [mysql2 connection options](https://github.com/mysqljs/mysql#connection-options) package.
 
 - `options` : object with the following properties :
 	- `host` : string, the host of the database
@@ -492,7 +507,8 @@ Initialize the ORM.
 	- `migrate` : string, the migration mode (alter, recreate, safe)
 	- `port` : integer, the port of the database (optional, default 3306)
 	- `debug` : boolean, if true, the SQL queries are logged (optional, default false)
-	- `log` : function, the function to log the SQL queries (optional, default console.log)
+	- `dateStrings` : boolean, if true, the dates are returned as strings (optional, default false)
+	- ... other options of the [mysql2 connection options](https://github.com/mysqljs/mysql#connection-options) package
 
 
 ### loadModels(pathModels)
