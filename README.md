@@ -475,3 +475,62 @@ const kindsAttributesEntries = Kinds.getAttributesEntries();
 // ]
 
 ```
+
+
+## API
+
+
+### MorphineDb.init(options)
+
+Initialize the ORM.
+
+- `options` : object with the following properties :
+	- `host` : string, the host of the database
+	- `user` : string, the user of the database
+	- `password` : string, the password of the database
+	- `database` : string, the name of the database
+	- `migrate` : string, the migration mode (alter, recreate, safe)
+	- `port` : integer, the port of the database (optional, default 3306)
+	- `debug` : boolean, if true, the SQL queries are logged (optional, default false)
+	- `log` : function, the function to log the SQL queries (optional, default console.log)
+
+
+### loadModels(pathModels)
+
+Load all models in the folder and subfolders passed as `pathModels`. Return a promise.
+
+
+### MorphineDb.query(sql, values)
+
+Do your own SQL queries.
+
+- `sql` : string, the SQL query
+- `values` : array of values to replace the ? in the SQL query
+- returns a promise that resolves with an array of objects
+- the objects have the attributes of the model
+
+
+### MorphineDb.close()
+
+Close the connection to the database.
+
+
+### Models
+
+The `Models` object contains all models that you have defined.
+
+```js
+const { Models } = require("morphine-orm");
+const { Dogs, Kinds } = Models;
+```
+
+### Model
+
+A model is an object with the following properties :
+
+
+
+
+## License
+
+MIT License
