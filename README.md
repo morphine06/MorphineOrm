@@ -395,6 +395,17 @@ Dogs.delete("kindId=?",[1]).exec();
 import { MorphineDb } from "morphine-orm";
 
 const dogs = await MorphineDb.query("SELECT * FROM Dogs WHERE name=? && kindId=?",["Roxy", 1]).exec();
+
+// always returns an array of objects
+// dogs = [
+//     {
+//         id: 1,
+//         name: "Roxy",
+//         birth: "2019-10-06",
+//         kindId: 1,
+//     },
+// ]
+
 ```
 
 ### 11. Some other methods
@@ -408,6 +419,20 @@ const dog = await Dogs.createEmpty();
 //     birth: "0000-00-00",
 //     kindId: 0,
 // }
+
+// select only some attributes
+const dogs = await Dogs.find().select(["name", "birth"]).exec();
+// dogs = [
+//     {
+//         name: "Rex",
+//         birth: "2019-10-06",
+//     },
+//     {
+//         name: "Jazz",
+//         birth: "2019-10-06",
+//     },
+// ]
+
 
 
 // count the number of records (sql queries are optimized)

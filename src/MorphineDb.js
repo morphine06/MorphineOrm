@@ -217,7 +217,7 @@ const MorphineDb = new (class {
 	async synchronize(def) {
 		let exists = true;
 
-		let rows1 = await this.connection.query("SELECT * FROM " + def.tableName + " LIMIT 0,1");
+		let rows1 = await this.connection.query(`SELECT * FROM ${def.tableName} LIMIT 0,1`);
 		if (rows1 && this.config.migrate == "recreate") await this.connection.query("DROP TABLE IF EXISTS " + def.tableName + "");
 		if (rows1 === null || this.config.migrate == "recreate") exists = false;
 
