@@ -18,7 +18,8 @@
 ```js
 // create a new record in Dogs table and a new record in Kinds table
 // just use plain javascript objects to create/update/get records
-// you can do : const dog = await Dogs.create(req.body).exec() for example to simplify your code
+// you can do : const dog = await Dogs.create(req.body).exec() 
+// for example to simplify your code
 const dog = await Dogs.create({
 	name: "Rex",
 	birth: "2019-10-06",
@@ -27,14 +28,15 @@ const dog = await Dogs.create({
 	},
 }).exec();
 
-// find some records just by complete the sql query after the where clause
-// don't learn a new syntax, just use the sql syntax
+// find some records just by complete the sql query after 
+// the where clause ; don't learn a new syntax, use sql syntax
 let dogs = Dogs.find(
 	"birth>? AND kind.name like ? order by name", 
 	["2015-01-01", "Lab%"]
 	).populate('kind').exec();
 
-// find the first record and populate the attributes of the associated model
+// find the first record and populate the attributes 
+// of the associated model
 const dog = await Dogs.findone(1).populate('kind').exec();
 
 ```
@@ -150,10 +152,10 @@ await loadModels("./models");
 
 `loadModels(pathModels)` will load all models in the folder and subfolders passed as `pathModels`. 
 
+
 ### 3. Create a new record
 
 #### 3.1. Create a record with only the attributes of the model
-
 
 
 ```js
@@ -236,11 +238,16 @@ const dog1 = await Dogs.findone(1).exec();
 const dog2 = await Dogs.findone({ id: 1 }).exec();
 // if you pass an object, the keys are the attributes of the
 // model and the values are the values to search :
-const dog3 = await Dogs.findone({ name: "Rex", birth:"2019-10-06" }).exec();
+const dog3 = await Dogs.findone(
+	{ name: "Rex", birth:"2019-10-06" }
+	).exec();
 // the first argument is the string after the where clause and
 // the second argument is an array of values to replace 
 // the ? in the string :
-const dog4 = await Dogs.findone("name=? && birth=?",["Rex", "2019-10-06"]).exec(); 
+const dog4 = await Dogs.findone(
+	"name=? && birth=?",
+	["Rex", "2019-10-06"]
+	).exec(); 
 
 // dog1 = dog2 = dog3 = dog4 = {
 //     id: 1,
@@ -276,7 +283,10 @@ const dog1 = await Dogs.findone(1).populate('kind').exec();
 const dogs1 = await Dogs.find().exec();
 // find all records with the kindId=1
 const dogs2 = await Dogs.find({ kindId: 1 }).exec();
-const dogs3 = await Dogs.find("kindId=? AND (name like ? OR name like ?)", [1, "Jazz", "%e%"]).exec();
+const dogs3 = await Dogs.find(
+	"kindId=? AND (name like ? OR name like ?)", 
+	[1, "Jazz", "%e%"]
+	).exec();
 
 // dogs1 = dogs2 = dogs3 = [
 //     {
@@ -405,7 +415,10 @@ Dogs.delete("kindId=?",[1]).exec();
 ```js
 import { MorphineDb } from "morphine-orm";
 
-const dogs = await MorphineDb.query("SELECT * FROM Dogs WHERE name=? && kindId=?",["Roxy", 1]).exec();
+const dogs = await MorphineDb.query(
+	"SELECT * FROM Dogs WHERE name=? && kindId=?",
+	["Roxy", 1]
+	).exec();
 
 // always returns an array of objects
 // dogs = [
