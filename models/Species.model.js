@@ -1,5 +1,6 @@
 module.exports = function mymodel() {
 	return {
+		tableName: "Species2",
 		attributes: {
 			id: {
 				type: "integer",
@@ -14,4 +15,4 @@ module.exports = function mymodel() {
 
 		},
 	};
-}
+};

@@ -35,6 +35,36 @@ const MorphineDb = new (class {
 					});
 				},
 			};
+		} else if (this.config.type == "pg") {
+			const { Client } = require("pg");
+			const client = new Client({
+				...config,
+				host: this.config.host || "localhost",
+				user: this.config.user || "root",
+				password: this.config.password || "",
+				database: this.config.database || "test",
+				port: this.config.port || 3306,
+			});
+			await client.connect();
+			this.connection = {
+				client: client,
+				query: async function (sql, sqlData = [], catchError = false) {
+					//replace ? by $1, $2, $3, ...
+					let i = 1;
+					while (sql.indexOf("?") != -1) {
+						sql = sql.replace("?", "$" + i);
+						i++;
+					}
+					try {
+						let results = await this.client.query(sql, sqlData);
+						return results.rows;
+					} catch (error) {
+						if (catchError) throw error;
+						console.warn(clc.red("sql-error"), error, sql, sqlData);
+						return null;
+					}
+				},
+			};
 		} else {
 			const mysql = require("mysql2/promise");
 			const pool = mysql.createPool({
@@ -84,10 +114,14 @@ const MorphineDb = new (class {
 		}
 		// console.log("toLink", toLink);
 		if (toLink.length) {
+			// let d = new Date();
 			// console.log("1");
 			let q = `select * from information_schema.KEY_COLUMN_USAGE where TABLE_NAME='${model.def.tableName}' && TABLE_SCHEMA='${this.config.database}'`; //COLUMN_NAME, CONSTRAINT_NAME, REFERENCED_COLUMN_NAME, REFERENCED_TABLE_NAME
+			if (this.config.type == "pg") q = `select * from information_schema.constraint_column_usage where TABLE_NAME='${model.def.tableName}' AND CONSTRAINT_SCHEMA='${this.config.database}'`;
 			let actualConstraints = await this.connection.query(q);
-			// console.log("2", q);
+			// console.log("🚀 ~ file: MorphineDb.js:91 ~ constraints ~ actualConstraints:", actualConstraints)
+			// console.log("2", q, d - new Date());
+			// d = new Date();
 			for (let iLink = 0; iLink < toLink.length; iLink++) {
 				const link = toLink[iLink];
 
@@ -95,14 +129,18 @@ const MorphineDb = new (class {
 					todelete = false;
 				for (let iActualConstraint = 0; iActualConstraint < actualConstraints.length; iActualConstraint++) {
 					const actualConstraint = actualConstraints[iActualConstraint];
-					let q2 = `select * from information_schema.referential_constraints where \`CONSTRAINT_NAME\` like '${actualConstraint.CONSTRAINT_NAME}'`;
-					// console.log("3", q2);
+					// console.log("🚀 ~ file: MorphineDb.js:100 ~ constraints ~ actualConstraint:", actualConstraint)
+					let q2 = `select * from information_schema.referential_constraints where \`CONSTRAINT_NAME\` like '${actualConstraint.CONSTRAINT_NAME}' AND TABLE_NAME='${model.def.tableName}' AND UNIQUE_CONSTRAINT_SCHEMA='${this.config.database}'`;
+					// console.log("3", q2, d - new Date());
+					// d = new Date();
 					let actualConstraintBis = (await this.connection.query(q2))[0];
+					// console.log("🚀 ~ file: MorphineDb.js:106 ~ constraints ~ actualConstraintBis:", actualConstraintBis)
 					if (!this.models[link.val.model]) {
 						console.warn(`Model not found : ${link.val.model}`);
 						continue;
 					}
-					// console.log("4");
+					// console.log("4", d - new Date());
+					// d = new Date();
 					if (
 						actualConstraint.COLUMN_NAME == link.key &&
 						actualConstraint.REFERENCED_TABLE_NAME == this.models[link.val.model].def.tableName
@@ -114,21 +152,30 @@ const MorphineDb = new (class {
 							tocreate = true;
 						}
 					}
-					// console.log("5");
+					// console.log("5", d - new Date());
+					// d = new Date();
 				}
 				if (todelete) {
 					let q = `ALTER TABLE \`${model.def.tableName}\` DROP FOREIGN KEY \`${todelete}\``;
-					console.warn(q);
+					console.warn(clc.yellow("info:"), q);
 					await this.connection.query(q);
 				}
 				if (tocreate && (link.val.onDelete || link.val.onUpdate)) {
-					let q = `ALTER TABLE \`${model.def.tableName}\` ADD CONSTRAINT \`${model.def.tableName}_${this.models[link.val.model].def.tableName
-						}_${link.key}_fk\` FOREIGN KEY (\`${link.key}\`) REFERENCES \`${this.models[link.val.model].def.tableName}\`(\`${this.models[link.val.model].primary
-						}\`)`;
-					if (link.val.onDelete) q += ` ON DELETE ${link.val.onDelete}`;
-					if (link.val.onUpdate) q += ` ON UPDATE ${link.val.onUpdate}`;
-					console.warn(q);
+					// console.log("6");
+					let q = "";
+					if (this.config.type == "pg") {
+						q = `ALTER TABLE ${model.def.tableName} ADD CONSTRAINT ${model.def.tableName}_${this.models[link.val.model].def.tableName}_${link.key}_fk FOREIGN KEY (${link.key}) REFERENCES ${this.models[link.val.model].def.tableName} (${this.models[link.val.model].primary})`;
+						if (link.val.onDelete) q += ` ON DELETE ${link.val.onDelete}`;
+						if (link.val.onUpdate) q += ` ON UPDATE ${link.val.onUpdate}`;
+					} else {
+						q = `ALTER TABLE \`${model.def.tableName}\` ADD CONSTRAINT \`${model.def.tableName}_${this.models[link.val.model].def.tableName}_${link.key}_fk\` FOREIGN KEY (\`${link.key}\`) REFERENCES \`${this.models[link.val.model].def.tableName}\`(\`${this.models[link.val.model].primary}\`)`;
+						if (link.val.onDelete) q += ` ON DELETE ${link.val.onDelete}`;
+						if (link.val.onUpdate) q += ` ON UPDATE ${link.val.onUpdate}`;
+					}
+
+					console.warn(clc.yellow("info:"), q);
 					await this.connection.query(q);
+					// console.log("7");
 				}
 			}
 		}
@@ -137,14 +184,15 @@ const MorphineDb = new (class {
 	async createTable(def) {
 		let what = [];
 		for (const [fieldName, field] of Object.entries(def.attributes)) {
+
 			if (field.model) {
 				let f = this._getJoinedModel(field);
-				if (f) what.push(fieldName + " " + this._ormTypeToDatabaseType(f[0], f[1]) + this._getNotnull(field));
+				if (f) what.push(fieldName + " " + this._ormTypeToDatabaseType(f, "ismodel") + this._getNotnull(field));
 			} else {
 				what.push(
 					fieldName +
 					" " +
-					this._ormTypeToDatabaseType(field.type, field.length) +
+					this._ormTypeToDatabaseType(field) +
 					this._getNotnull(field) +
 					this._getIndex(field) +
 					this._getDefault(field, fieldName),
@@ -165,12 +213,12 @@ const MorphineDb = new (class {
 			if (field.model) {
 				let f = this._getJoinedModel(field);
 				if (f) {
-					type1 = this._ormTypeToDatabaseType(f[0], f[1]);
-					field.type = f[0];
-					field.length = f[1];
+					type1 = this._ormTypeToDatabaseType(f);
+					field.type = f.type;
+					field.length = f.length ? f.length : 11;
 				}
 			} else {
-				type1 = this._ormTypeToDatabaseType(field.type, field.length);
+				type1 = this._ormTypeToDatabaseType(field);
 			}
 			let type2 = null,
 				def2 = null;
@@ -200,8 +248,8 @@ const MorphineDb = new (class {
 			if (type2 === null) {
 				if (field.model) {
 					let f = this._getJoinedModel(field);
-					field.type = f[0];
-					field.length = f[1];
+					field.type = f.type;
+					field.length = f.length ? f.length : 11;
 				}
 				let q =
 					"ALTER TABLE " +
@@ -209,7 +257,7 @@ const MorphineDb = new (class {
 					" ADD " +
 					fieldName +
 					" " +
-					this._ormTypeToDatabaseType(field.type, field.length) +
+					this._ormTypeToDatabaseType(field) +
 					this._getNotnull(field) +
 					this._getIndex(field) +
 					this._getDefault(field, fieldName);
@@ -228,7 +276,7 @@ const MorphineDb = new (class {
 					" " +
 					fieldName +
 					" " +
-					this._ormTypeToDatabaseType(field.type, field.length) +
+					this._ormTypeToDatabaseType(field) +
 					this._getNotnull(field) +
 					this._getDefault(field, fieldName);
 				if (this.config.type == "sqlite3") {
@@ -246,7 +294,7 @@ const MorphineDb = new (class {
 					" " +
 					fieldName +
 					" " +
-					this._ormTypeToDatabaseType(field.type, field.length) +
+					this._ormTypeToDatabaseType(field) +
 					this._getNotnull(field) +
 					this._getIndex(field) +
 					this._getDefault(field, fieldName);
@@ -263,7 +311,9 @@ const MorphineDb = new (class {
 	async updateIndexes(def) {
 		let rows2;
 		if (this.config.type == "sqlite3") rows2 = await this.connection.query(`SELECT * from sqlite_master WHERE type='index' AND tbl_name='${def.tableName}'`);
+		else if (this.config.type == "pg") rows2 = await this.connection.query(`SELECT * FROM pg_indexes WHERE tablename='${def.tableName.toLowerCase()}'`);
 		else rows2 = await this.connection.query(`SHOW INDEX FROM ${def.tableName}`);
+		// console.log("🚀 ~ file: MorphineDb.js:306 ~ updateIndexes ~ rows2:", `SELECT * FROM pg_indexes WHERE tablename='${def.tableName}'`, rows2);
 		for (const [fieldName, field] of Object.entries(def.attributes)) {
 			let createIndex = false;
 			//let createUnique = false;
@@ -272,6 +322,7 @@ const MorphineDb = new (class {
 				for (let iRows = 0; iRows < rows2.length; iRows++) {
 					const row2 = rows2[iRows];
 					if (this.config.type == "sqlite3" && row2.name == `${def.tableName}_${fieldName}_idx`) createIndex = false;
+					else if (this.config.type == "pg" && row2.indexname == `${def.tableName}_${fieldName}_idx`.toLowerCase()) createIndex = false;
 					else if (row2.Column_name == fieldName) createIndex = false;
 				}
 			}
@@ -286,6 +337,7 @@ const MorphineDb = new (class {
 			if (createIndex) {
 				let q = "";
 				if (this.config.type == "sqlite3") q = `CREATE INDEX ${def.tableName}_${fieldName}_idx ON ${def.tableName} (${fieldName})`;
+				else if (this.config.type == "pg") q = `CREATE INDEX IF NOT EXISTS ${def.tableName}_${fieldName}_idx ON ${def.tableName} (${fieldName})`;
 				else q = `ALTER TABLE ${def.tableName} ADD INDEX (${fieldName})`;
 				console.warn(clc.yellow("info:"), q);
 				await this.connection.query(q);
@@ -314,35 +366,40 @@ const MorphineDb = new (class {
 			await this.updateIndexes(def);
 		}
 	}
-	_ormTypeToDatabaseType(ormtype, length, info) {
-		if (!info) info = "type";
+	_ormTypeToDatabaseType(field, info = "type") {
+		console.log("🚀 ~ file: MorphineDb.js:369 ~ _ormTypeToDatabaseType ~ field:", field);
 		let typeJS = "";
-		ormtype = ormtype.toLowerCase();
+		let ormtype = field.type.toLowerCase();
+		let ormlength = field.length;
+		if (this.config.type == "pg" && field.primary && !field.model && ormtype == "integer" && info == "type") {
+			return "";
+		}
 		let res = "";
 		if (ormtype == "int" || ormtype == "integer") {
-			if (!length) length = 11;
+			if (!ormlength) ormlength = 11;
 			if (this.config.type == "sqlite3") res = "INTEGER";
-			else res = "INT(" + length + ")";
+			else if (this.config.type == "pg") res = "INTEGER";
+			else res = "INT(" + ormlength + ")";
 			typeJS = "number";
 		} else if (ormtype == "tinyint") {
-			if (!length) length = 4;
-			res = "TINYINT(" + length + ")";
+			if (!ormlength) ormlength = 4;
+			res = "TINYINT(" + ormlength + ")";
 			typeJS = "number";
 		} else if (ormtype == "smallint") {
-			if (!length) length = 6;
-			res = "SMALLINT(" + length + ")";
+			if (!ormlength) ormlength = 6;
+			res = "SMALLINT(" + ormlength + ")";
 			typeJS = "number";
 		} else if (ormtype == "mediumint") {
-			if (!length) length = 9;
-			res = "MEDIUMINT(" + length + ")";
+			if (!ormlength) ormlength = 9;
+			res = "MEDIUMINT(" + ormlength + ")";
 			typeJS = "number";
 		} else if (ormtype == "year") {
-			if (!length) length = 4;
-			res = "YEAR(" + length + ")";
+			if (!ormlength) ormlength = 4;
+			res = "YEAR(" + ormlength + ")";
 			typeJS = "number";
 		} else if (ormtype == "float") {
 			res = "FLOAT";
-			if (length) res += "(" + length + ")";
+			if (ormlength) res += "(" + ormlength + ")";
 			typeJS = "number";
 		} else if (ormtype == "double") {
 			res = "DOUBLE";
@@ -356,13 +413,14 @@ const MorphineDb = new (class {
 		} else if (ormtype == "datetime") {
 			res = "DATETIME";
 			typeJS = "date";
+			if (this.config.type == "pg") res = "TIMESTAMP";
 		} else if (ormtype == "char") {
-			if (!length) length = 1;
-			res = "CHAR(" + length + ")";
+			if (!ormlength) ormlength = 1;
+			res = "CHAR(" + ormlength + ")";
 			typeJS = "string";
 		} else if (ormtype == "varchar" || ormtype == "string") {
-			if (!length) length = 255;
-			res = "VARCHAR(" + length + ")";
+			if (!ormlength) ormlength = 255;
+			res = "VARCHAR(" + ormlength + ")";
 			typeJS = "string";
 		} else if (ormtype == "tinytext") {
 			res = "TINYTEXT";
@@ -383,12 +441,12 @@ const MorphineDb = new (class {
 			res = "SET";
 			typeJS = "string";
 		} else if (ormtype == "decimal" || ormtype == "price") {
-			if (!length) length = "10,2";
-			res = "DECIMAL(" + length + ")";
+			if (!ormlength) ormlength = "10,2";
+			res = "DECIMAL(" + ormlength + ")";
 			typeJS = "number";
 		} else if (ormtype == "bigint") {
-			if (!length) length = 20;
-			res = "BIGINT(" + length + ")";
+			if (!ormlength) ormlength = 20;
+			res = "BIGINT(" + ormlength + ")";
 			typeJS = "number";
 		} else if (ormtype == "time") {
 			res = "TIME";
@@ -420,18 +478,23 @@ const MorphineDb = new (class {
 		}
 
 		if (info == "typejs") return typeJS;
-		else return res;
-	}
-	_getIndex(field) {
-		let res = "";
-		if (field.primary) res += " PRIMARY KEY";
-		if (field.autoincrement) {
-			if (this.config.type == "sqlite3") res += " AUTOINCREMENT";
-			else res += " AUTO_INCREMENT";
-		}
 		return res;
 	}
+	_getIndex(field) {
+		let res = [];
+		if (field.primary) {
+			if (this.config.type == "pg") res.push("SERIAL UNIQUE");
+			else res.push("PRIMARY KEY");
+		}
+		if (field.autoincrement) {
+			if (this.config.type == "sqlite3") res.push("AUTOINCREMENT");
+			else if (this.config.type == "pg") res.push("");
+			else res.push("AUTO_INCREMENT");
+		}
+		return " " + res.join(" ");
+	}
 	_getNotnull(field) {
+		if (this.config.type == "pg" && field.primary && field.type == "integer") return "";
 		let res = "";
 		// if (field.notnull || typeof field.notnull == "undefined") res = " NOT NULL";
 		// else res = " NULL";
@@ -458,12 +521,17 @@ const MorphineDb = new (class {
 					console.warn(clc.red(`defaultsTo '${fieldName}' must be a valid Json object`));
 				}
 			}
+			if (this.config.type == "pg") {
+				if (!field.defaultsTo) defaultsTo = "";
+				if (field.defaultsTo == "0000-00-00" || field.defaultsTo == "0000-00-00 00:00:00") defaultsTo = "";
+			}
 		}
 		return defaultsTo;
 	}
 	_getJoinedModel(field) {
 		if (this.models[field.model]) {
-			return [this.models[field.model].primaryType, this.models[field.model].primaryLength];
+			// return [this.models[field.model].primaryType, this.models[field.model].primaryLength];
+			return this.models[field.model].primaryField;
 		} else {
 			console.warn("Model " + field.model + " not found");
 		}
@@ -475,8 +543,7 @@ const MorphineDb = new (class {
 })();
 
 function Model(models = []) {
-	if (models instanceof Array) {
-	} else models = [models];
+	if (!(models instanceof Array)) models = [models];
 	return function decorator(target) {
 		if (!target.prototype._models) target.prototype._models = [];
 		target.prototype._models = [...target.prototype._models, ...models];
@@ -521,9 +588,9 @@ async function loadModels() {
 		// d = new Date();
 
 		// warning, je désactive les contraintes car trop long à calculer
-		// for (const model of Object.values(MorphineDb.models)) {
-		// 	await MorphineDb.constraints(model);
-		// }
+		for (const model of Object.values(MorphineDb.models)) {
+			await MorphineDb.constraints(model);
+		}
 
 		// console.log("d4b = ", new Date() - d);
 		// d = new Date();

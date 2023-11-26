@@ -1,5 +1,8 @@
 const dayjs = require("dayjs");
+const clc = require("cli-color");
+const validator = require("validator");
 
+/*eslint indent: "off"*/
 class MorphineTableExec {
 	constructor(table) {
 		this.table = table;
@@ -115,20 +118,24 @@ class MorphineTableExec {
 		this.command = "TRUNCATE";
 		return this;
 	}
+	drop() {
+		this.command = "DROP";
+		return this;
+	}
 
 
 	_searchModelFromFieldName(fieldJoin, fromModelName) {
 		let f = null,
-			n = "",
+			// n = "",
 			isNotAlias = false;
 		for (const [fieldName, field] of Object.entries(this.MorphineDb.models[fromModelName].def.attributes)) {
 			if (field.model && (field.alias == fieldJoin || fieldName == fieldJoin)) {
 				f = field;
-				n = fieldName;
+				f.field = fieldName;
 				if (fieldName == fieldJoin) isNotAlias = true;
 			}
 		}
-		return { modeltolink: f, modeltolinkname: n, isNotAlias };
+		return { modeltolink: f, isNotAlias };
 	}
 	log() {
 		this.logQuery = true;
@@ -150,18 +157,14 @@ class MorphineTableExec {
 		this.returnCompleteRow = returnCompleteRow;
 		return this;
 	}
-	populateAll(exclude = [], maxlevel = 2) {
-		// console.log("populateAll");
+	populateAll(exclude = [], maxlevel = 3) {
 		let me = this;
 		function populateThis(table, origins, level) {
-			// console.log("table", table.def.tableName, origins);
 			// eslint-disable-next-line
 			for (const [field, defField] of Object.entries(table.def.attributes)) {
 				if (defField.model) {
-					// console.log("field", field, level);
 					if (exclude.indexOf(origins + defField.alias) >= 0) continue;
 					me.populate(origins + defField.alias);
-					// console.log("origins + defField.alias", origins + defField.alias);
 					level++;
 					if (level < maxlevel) populateThis(me.MorphineDb.models[defField.model], origins + defField.alias + ".", level);
 				}
@@ -172,7 +175,6 @@ class MorphineTableExec {
 		return this;
 	}
 	populate(fieldJoin) {
-		// console.log("🚀 ~ file: MorphineTableExec.js:175 ~ MorphineTableExec ~ populate ~ fieldJoin:", fieldJoin)
 		this.tabOriginalsPopulate.push(fieldJoin);
 		let tabFieldsJoins = fieldJoin.split(".");
 		let previousModelName = this.modelname;
@@ -181,13 +183,13 @@ class MorphineTableExec {
 		for (let iJoin = 0; iJoin < tabFieldsJoins.length; iJoin++) {
 			let join = tabFieldsJoins[iJoin];
 
-			let { modeltolink, modeltolinkname, isNotAlias } = this._searchModelFromFieldName(join, previousModelName);
+			let { modeltolink, isNotAlias } = this._searchModelFromFieldName(join, previousModelName);
 			if (!modeltolink) {
 				console.warn(`The alias ${join} not found in table ${previousModelName}. Can't populate ${fieldJoin}.`);
 				break;
 			}
 			if (!modeltolink.alias) {
-				console.warn(`Alias name is mandatory for field ${modeltolinkname}`);
+				console.warn(`Alias name is mandatory for field ${modeltolink.field}`);
 				break;
 			}
 			if (isNotAlias) {
@@ -200,10 +202,14 @@ class MorphineTableExec {
 				modelalias = tabOrigin.join("__"); //+ modeltolink.alias
 				this.joinModels.push({
 					modelname: modeltolink.model,
-					modelalias: modelalias,
-					fieldJoin: modeltolinkname,
+					modelalias: modeltolink.alias,
+					// modeltablename: this.MorphineDb.models[modeltolink.model].def.tableName,
+					modelid: this.MorphineDb.models[modeltolink.model].primary,
+					fieldJoin: modeltolink.field,
 					modelnameto: previousModelName,
 					modelaliasto: previousModelAlias,
+					// modeltablenameto: this.MorphineDb.models[previousModelName].def.tableName,
+					modelidto: modeltolink.field,
 					origin: tabOrigin.join("."),
 					fieldJoinName: modeltolink.alias || null,
 				});
@@ -214,6 +220,24 @@ class MorphineTableExec {
 			previousModelName = modeltolink.model;
 			previousModelAlias = modelalias;
 		}
+		return this;
+	}
+	onetomany(modelJoin, fieldJoin, alias) {
+		// let tabFieldsJoins = fieldJoin.split(".");
+		let { modeltolink } = this._searchModelFromFieldName(fieldJoin, modelJoin);
+		this.joinModels.push({
+			isOneToMany: true,
+			modelname: modelJoin,
+			modelalias: alias,
+			modelid: modeltolink.field,
+			fieldJoin: modeltolink.field,
+			modelnameto: this.modelname,
+			modelaliasto: this.modelname,
+			modelidto: this.MorphineDb.models[this.modelname].primary,
+			origin: modelJoin + "__" + fieldJoin,
+			fieldJoinName: alias,
+		});
+
 		return this;
 	}
 	orderBy(order) {
@@ -247,7 +271,7 @@ class MorphineTableExec {
 				this.whereData = this.whereData.concat(this.original_whereData);
 			}
 		} else {
-			where += "1";
+			where += "1=1";
 			Object.entries(this.where).forEach(([key, val], index) => {
 				if (key.indexOf(".") < 0) key = this.modelname + "." + key;
 				where += " AND " + key + "=?";
@@ -271,9 +295,11 @@ class MorphineTableExec {
 	}
 	_createJoin() {
 		let tabJoin = [];
+
 		this.joinModels.forEach((model, num) => {
 			if (!model.modelnameto) tabJoin.push(this.MorphineDb.models[model.modelname].def.tableName + " " + model.modelalias);
-			else
+			else {
+				// if (model.isOneToMany) {
 				tabJoin.push(
 					"LEFT JOIN " +
 					this.MorphineDb.models[model.modelname].def.tableName +
@@ -282,12 +308,31 @@ class MorphineTableExec {
 					" ON " +
 					model.modelalias +
 					"." +
-					this.MorphineDb.models[model.modelname].primary +
+					model.modelid +
 					"=" +
 					model.modelaliasto +
 					"." +
-					model.fieldJoin,
+					model.modelidto,
 				);
+
+				// } else {
+				// 	tabJoin.push(
+				// 		"LEFT JOIN " +
+				// 		this.MorphineDb.models[model.modelname].def.tableName +
+				// 		" " +
+				// 		model.modelalias +
+				// 		" ON " +
+				// 		model.modelalias +
+				// 		"." +
+				// 		this.MorphineDb.models[model.modelname].primary +
+				// 		"=" +
+				// 		model.modelaliasto +
+				// 		"." +
+				// 		model.fieldJoin,
+				// 	);
+
+				// }
+			}
 		});
 		return tabJoin.join(" ");
 	}
@@ -307,10 +352,8 @@ class MorphineTableExec {
 
 	async _createOrUpdateJoinedData() {
 		// create first the models to join
-		console.log("ici");
 		for (const [key, val] of Object.entries(this.def.attributes)) {
 			if (val.model && this.data[val.alias] && typeof this.data[val.alias] == "object" && this.tabOriginalsPopulate.indexOf(val.alias) >= 0) {
-				// console.log("data to insert into " + val.model, this.data[val.alias]);
 				let modelJoin = this.MorphineDb.models[val.model];
 				let modelJoinData = this.data[val.alias];
 				let createJoin = false, modifyJoin = false;
@@ -329,14 +372,14 @@ class MorphineTableExec {
 				}
 
 				if (createJoin) {
-					// console.log('this.tabOriginalsPopulate', this.tabOriginalsPopulate);
 					let mt = (new MorphineTableExec(modelJoin)).create(modelJoinData);
 					tabNewJoins.map((toPopulate) => mt.populate(toPopulate));
 					let c = await mt.exec();
+					// console.log("🚀 ~ file: MorphineTableExec.js:378 ~ MorphineTableExec ~ _createOrUpdateJoinedData ~ c:", c);
 					this.data[key] = c[modelJoin.primary];
 				}
 				if (modifyJoin) {
-					let mt = (new MorphineTableExec(modelJoin)).updateone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData)
+					let mt = (new MorphineTableExec(modelJoin)).updateone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData);
 					tabNewJoins.map((toPopulate) => mt.populate(toPopulate));
 					let c = await mt.exec();
 					this.data[key] = c[modelJoin.primary];
@@ -348,12 +391,11 @@ class MorphineTableExec {
 	async _createInsertQuery() {
 		let fields = [],
 			vals = [];
-		// console.log("this.data", this.data);
 		for (const [key, val] of Object.entries(this.def.attributes)) {
 			if (val.primary && val.autoincrement) continue;
 			fields.push(key);
 			vals.push("?");
-			if (this.data.hasOwnProperty(key)) {
+			if (Object.prototype.hasOwnProperty.call(this.data, key)) {
 				this.whereData.push(this.data[key]);
 			} else {
 				if (val.defaultsTo) this.whereData.push(val.defaultsTo);
@@ -375,6 +417,7 @@ class MorphineTableExec {
 			}
 		}
 		let query = "INSERT INTO " + this.def.tableName + "(" + fields.join(", ") + ") VALUES (" + vals.join(", ") + ")";
+		if (this.MorphineDb.config.type == "pg") query += " RETURNING " + this.primary;
 		return query;
 	}
 	_createUpdateQuery() {
@@ -409,8 +452,22 @@ class MorphineTableExec {
 		else query = `TRUNCATE ${this.def.tableName}`;
 		return query;
 	}
+	_createDropQuery() {
+		let query = "";
+		query = `DROP TABLE ${this.def.tableName}`;
+		return query;
+	}
 	_preTreatment() {
 		for (const [fieldName, field] of Object.entries(this.def.attributes)) {
+			if (field.type == "date" && this.data[fieldName] == undefined) {
+				if (this.MorphineDb.config.type == "pg") {
+					this.data[fieldName] = null;
+				} else {
+					this.data[fieldName] = "0000-00-00";
+				}
+				continue;
+			}
+
 			if (!fieldName || this.data[fieldName] === undefined) continue;
 			// if (this.data[fieldName]===null)
 
@@ -425,7 +482,9 @@ class MorphineTableExec {
 			if (field.type == "json" && typeof this.data[fieldName] !== "object") {
 				try {
 					this.data[fieldName] = JSON.parse(this.data[fieldName]);
-				} catch (e) {}
+				} catch (e) {
+					// console.warn("json stringify error", e);
+				}
 				try {
 					this.data[fieldName] = JSON.stringify(this.data[fieldName]);
 				} catch (e) {
@@ -442,9 +501,16 @@ class MorphineTableExec {
 			if (field.type == "datetime" && this.data[fieldName]) {
 				this.data[fieldName] = dayjs(this.data[fieldName]).format("YYYY-MM-DD HH:mm:ss");
 			}
-			if (field.type == "date" && this.data[fieldName]) {
+			console.log("this.data[fieldName]", fieldName, this.data[fieldName]);
+			if (field.type == "date" && this.data[fieldName] != undefined) {
 				let m = dayjs(this.data[fieldName]);
-				if (this.data[fieldName] == "0000-00-00" || this.data[fieldName] == "" || !m.isValid()) this.data[fieldName] = "0000-00-00";
+				if (!this.data[fieldName] || this.data[fieldName] == "0000-00-00" || this.data[fieldName] == "" || !m.isValid()) {
+					if (this.MorphineDb.config.type == "pg") {
+						this.data[fieldName] = null;
+					} else {
+						this.data[fieldName] = "0000-00-00";
+					}
+				}
 				else this.data[fieldName] = m.format("YYYY-MM-DD");
 			}
 			if (field.type == "datetime" && this.data[fieldName]) {
@@ -461,6 +527,7 @@ class MorphineTableExec {
 		}
 	}
 	_postTreatment(rows) {
+		let hasOneToMany = false;
 		rows.forEach((row) => {
 			for (const [fieldName, field] of Object.entries(this.def.attributes)) {
 				if (field.type == "json") {
@@ -478,13 +545,17 @@ class MorphineTableExec {
 				}
 			}
 			this.joinModels.forEach((model, num) => {
+				if (model.isOneToMany) {
+					hasOneToMany = true;
+					// return;
+				}
 				if (model.modelnameto) {
 					let obj = {};
 
 					for (const [fieldName, field] of Object.entries(this.MorphineDb.models[model.modelname].def.attributes)) {
 						// let f = MorphineDb.models[model.modelname].def.tableName+'_'+model.fieldJoin+'_'+fieldName ;
 						let f = model.modelalias + "_" + model.fieldJoin + "_" + fieldName;
-						if (row.hasOwnProperty(f)) {
+						if (Object.prototype.hasOwnProperty.call(row, f)) {
 							if (field.type == "json") {
 								try {
 									if (row[f]) row[f] = JSON.parse(row[f]);
@@ -517,6 +588,27 @@ class MorphineTableExec {
 				}
 			});
 		});
+		if (hasOneToMany) {
+			let rowsOk = [];
+			this.joinModels.forEach((model, num) => {
+				if (!model.isOneToMany) return;
+				rows.forEach((row) => {
+					let f = rowsOk.find((r) => {
+						return r[this.primary] === row[this.primary];
+					});
+					if (!f) {
+						row[model.fieldJoinName] = [row[model.origin]];
+						rowsOk.push(row);
+						delete row[model.origin];
+					} else {
+						f[model.fieldJoinName].push(row[model.origin]);
+					}
+				});
+			});
+			return rowsOk;
+		}
+		return rows;
+
 	}
 	async _beforeQuery() {
 		let fn = null,
@@ -543,6 +635,9 @@ class MorphineTableExec {
 			case "TRUNCATE":
 				if (this.def.beforeTruncate) fn = this.def.beforeTruncate;
 				break;
+			case "DROP":
+				if (this.def.beforeDrop) fn = this.def.beforeDrop;
+				break;
 			// case 'REPLACE':
 			// if (this.def.beforeCreate) fn = this.def.beforeCreate ;
 			// break;
@@ -551,7 +646,24 @@ class MorphineTableExec {
 		}
 		if (fn) await fn(this.data);
 		else if (fn2) await fn();
-		// console.log("this.data", this.data);
+	}
+	_validate() {
+		let errors = [];
+		for (const [fieldName, field] of Object.entries(this.def.attributes)) {
+			if (field.validator &&
+				field.validator.fn &&
+				field.validator.args &&
+				this.data[fieldName] !== undefined
+			) {
+				let args = [this.data[fieldName]];
+				// if (typeof args == "string") args = [args];
+				if (!validator[field.validator.fn].apply(null, args)) {
+					errors.push({ field: fieldName, error: field.validator.fn, args: field.validator.args });
+				}
+			}
+		}
+		console.log("🚀 ~ file: MorphineTableExec.js:648 ~ MorphineTableExec ~ _validate ~ errors:", errors);
+		return errors;
 	}
 	async exec(returnCompleteRow = true) {
 		if (this.command == "REPLACE") {
@@ -577,16 +689,19 @@ class MorphineTableExec {
 
 		await this._beforeQuery();
 		let query;
+
 		switch (this.command) {
 			case "QUERY":
 				query = this.querySaved;
 				break;
 			case "INSERT":
+				this._validate();
 				this._preTreatment();
 				await this._createOrUpdateJoinedData();
 				query = await this._createInsertQuery();
 				break;
 			case "UPDATE":
+				this._validate();
 				this._preTreatment();
 				await this._createOrUpdateJoinedData();
 				query = this._createUpdateQuery();
@@ -597,23 +712,26 @@ class MorphineTableExec {
 			case "TRUNCATE":
 				query = this._createTruncateQuery();
 				break;
+			case "DROP":
+				query = this._createDropQuery();
+				break;
 			default:
 				query = this._createSelectQuery();
 		}
 
-		if (this.def.debug || this.logQuery) console.warn("query", query, this.whereData);
+		if (this.def.debug || this.logQuery) console.warn(clc.yellow("query:"), query, this.whereData);
 		let rows;
-		try {
-			rows = await this.connection.query(query, this.whereData, this.catchErr);
-		} catch (error) {
-			throw error;
-		}
+		// try {
+		rows = await this.connection.query(query, this.whereData, this.catchErr);
+		// } catch (error) {
+		// 	throw error;
+		// }
 		let data = await this.postTreatmentMain(rows, returnCompleteRow);
 		return data;
 		// }
 	}
 	async postTreatmentMain(rows, returnCompleteRow) {
-		// console.log("🚀 ~ file: MorphineTableExec.js:597 ~ postTreatmentMain ~ rows:", rows)
+		// console.log("🚀 ~ file: MorphineTableExec.js:718 ~ postTreatmentMain ~ rows:", rows);
 		let res;
 		if (!rows) {
 			res = {};
@@ -632,6 +750,9 @@ class MorphineTableExec {
 					break;
 				case "TRUNCATE":
 					res = [];
+					break;
+				case "DROP":
+					res = null;
 					break;
 				default:
 					res = {};
@@ -652,10 +773,15 @@ class MorphineTableExec {
 			case "TRUNCATE":
 				res = rows.affectedRows;
 				break;
+			case "DROP":
+				res = rows.affectedRows;
+				break;
 			case "INSERT":
 				if (this.MorphineDb.config.type == "sqlite3") {
 					let lastinsert = await this.MorphineDb.query("SELECT last_insert_rowid()");
 					res = lastinsert[0]["last_insert_rowid()"];
+				} else if (this.MorphineDb.config.type == "pg") {
+					res = rows[0][this.primary];
 				} else {
 					res = rows.insertId;
 				}
@@ -664,7 +790,7 @@ class MorphineTableExec {
 			default:
 				if (this.iscount) res = rows[0].cmpt;
 				else {
-					this._postTreatment(rows);
+					rows = this._postTreatment(rows);
 					if (this.onlyOne) {
 						if (rows.length) res = rows[0];
 						else res = null;
@@ -684,7 +810,6 @@ class MorphineTableExec {
 				if (!res) {
 					ftemp[this.modelname + "." + this.primary] = this.data[this.primary];
 				}
-				// console.log('this.tabOriginalsPopulate', this.tabOriginalsPopulate);
 				let tableToExec = this.table.findone(ftemp);
 				for (let iOp = 0; iOp < this.tabOriginalsPopulate.length; iOp++) {
 					const fieldJoin = this.tabOriginalsPopulate[iOp];

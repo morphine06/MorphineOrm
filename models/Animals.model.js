@@ -1,5 +1,6 @@
 module.exports = function mymodel() {
 	return {
+		tableName: "Animals2",
 		attributes: {
 			id: {
 				type: "integer",
@@ -10,15 +11,22 @@ module.exports = function mymodel() {
 				type: "string",
 				defaultsTo: "",
 				index: true,
+				validator: {
+					fn: "isLength",
+					args: { min: 10, max: 255 },
+				},
 			},
 			birth: {
 				type: "date",
 				defaultsTo: "0000-00-00",
+				notnull: false,
 				index: true,
 			},
-			kindId: {
+			breedId: {
 				model: "Breeds",
 				alias: "breed",
+				onDelete: "RESTRICT", // RESTRICT, CASCADE, SET NULL,
+				onUpdate: "RESTRICT", // RESTRICT, CASCADE, SET NULL,
 			},
 			// size: {
 			// 	type: "string",
@@ -69,4 +77,4 @@ module.exports = function mymodel() {
 			// },
 		},
 	};
-}
+};

@@ -9,10 +9,13 @@ class MorphineTable {
 		this.primary = "";
 		this.primaryType = "integer";
 		this.primaryLength = 11;
+		this.primaryField = null;
 		for (const [fieldName, field] of Object.entries(this.def.attributes)) {
+			field.fieldName = fieldName;
 			if (field.primary) {
 				this.primary = fieldName;
 				this.primaryType = field.type;
+				this.primaryField = field;
 				if (field.length) this.primaryLength = field.length;
 			}
 		}
@@ -22,7 +25,7 @@ class MorphineTable {
 		for (const [fieldName, field] of Object.entries(this.def.attributes)) {
 			if (field.model) continue;
 			row[fieldName] = "";
-			let typejs = this.MorphineDb._ormTypeToDatabaseType(field.type, "", "typejs");
+			let typejs = this.MorphineDb._ormTypeToDatabaseType(field, "typejs");
 			if (typejs == "number") row[fieldName] = 0;
 			if (typejs == "date") row[fieldName] = null;
 			if (typejs == "boolean") row[fieldName] = false;
@@ -102,6 +105,10 @@ class MorphineTable {
 	truncate() {
 		let exec = new MorphineTableExec(this);
 		return exec.truncate();
+	}
+	drop() {
+		let exec = new MorphineTableExec(this);
+		return exec.drop();
 	}
 }
 
