@@ -21,19 +21,19 @@
 // you can do : const dog = await Dogs.create(req.body).exec() 
 // for example to simplify your code
 const dog = await Dogs.create({
-	name: "Rex",
-	birth: "2019-10-06",
-	kind: {
-		name: "Labrador",
-	},
+   name: "Rex",
+   birth: "2019-10-06",
+   kind: {
+      name: "Labrador",
+   },
 }).exec();
 
 // find some records just by complete the sql query after 
 // the where clause ; don't learn a new syntax, use sql syntax
 let dogs = Dogs.find(
-	"birth>? AND kind.name like ? order by name", 
-	["2015-01-01", "Lab%"]
-	).populate('kind').exec();
+   "birth>? AND kind.name like ? order by name", 
+   ["2015-01-01", "Lab%"]
+   ).populate('kind').exec();
 
 // find the first record and populate the attributes 
 // of the associated model
@@ -71,49 +71,49 @@ Tables are automatically created from models when the application starts.
 ```js
 // /models/Dogs.model.js
 module.exports = function mymodel() {
-  return {
-    attributes: {
-      id: {
-        type: "integer",
-        autoincrement: true,
-        primary: true,
+   return {
+      attributes: {
+         id: {
+            type: "integer",
+            autoincrement: true,
+            primary: true,
+         },
+         name: {
+            type: "string",
+            defaultsTo: "",
+            index: true,
+         },
+         birth: {
+            type: "date",
+            defaultsTo: "0000-00-00",
+            index: true,
+         },
+         kindId: {
+            model: "Kinds",
+            alias: "kind",
+         },
       },
-      name: {
-        type: "string",
-        defaultsTo: "",
-        index: true,
-      },
-      birth: {
-        type: "date",
-        defaultsTo: "0000-00-00",
-        index: true,
-      },
-      kindId: {
-        model: "Kinds",
-        alias: "kind",
-      },
-    },
-  };
+   };
 }
 ```
 
 ```js
 // /models/Kinds.model.js
 module.exports = function mymodel() {
-  return {
-    attributes: {
-      id: {
-        type: "integer",
-        autoincrement: true,
-        primary: true,
+   return {
+      attributes: {
+         id: {
+            type: "integer",
+            autoincrement: true,
+            primary: true,
+         },
+         name: {
+            type: "string",
+            defaultsTo: "",
+            index: true,
+         },
       },
-      name: {
-        type: "string",
-        defaultsTo: "",
-        index: true,
-      },
-    },
-  };
+   };
 }
 ```
 
@@ -133,13 +133,13 @@ import { MorphineDb, loadModels } from "morphine-orm";
 const { MorphineDb, loadModels } = require("morphine-orm");
 
 await MorphineDb.init({
-  host: process.env.DBHOST,
-  user: process.env.DBUSER,
-  password: process.env.DBPASSWORD,
-  database: process.env.DBNAME,
-  migrate: "alter", // alter, recreate, safe
-  port: 3306,
-  dateStrings: true,
+   host: process.env.DBHOST,
+   user: process.env.DBUSER,
+   password: process.env.DBPASSWORD,
+   database: process.env.DBNAME,
+   migrate: "alter", // alter, recreate, safe
+   port: 3306,
+   dateStrings: true,
 });
 await loadModels("./models");
 ```
@@ -163,15 +163,15 @@ const { Models } = require("morphine-orm");
 const { Dogs } = Models;
 
 const dogRex = await Dogs.create({
-  name: "Rex",
-  birth: "2019-10-06",
+   name: "Rex",
+   birth: "2019-10-06",
 }).exec();
 
 // dogRex = {
-//   id: 1,
-//   name: "Rex",
-//   birth: "2019-10-06",
-//   kindId: 0,
+//    id: 1,
+//    name: "Rex",
+//    birth: "2019-10-06",
+//    kindId: 0,
 // }
 ```
 
@@ -179,21 +179,21 @@ const dogRex = await Dogs.create({
 
 ```js
 const dogJazz = await Dogs.create({
-  name: "Jazz",
-  birth: "2019-10-06",
-  kind: {
-    name: "Labrador",
-  },
+   name: "Jazz",
+   birth: "2019-10-06",
+   kind: {
+      name: "Labrador",
+   },
 }).populate('kind').exec();
 
 // dogJazz = {
-//   id: 2,
-//   name: "Jazz",
-//   kindId: 1,
-//   kind: {
-//     id: 1,
-//     name: "Labrador",
-//   },
+//    id: 2,
+//    name: "Jazz",
+//    kindId: 1,
+//    kind: {
+//       id: 1,
+//       name: "Labrador",
+//    },
 // }
 ```
 
@@ -203,29 +203,29 @@ Now, if you create a new dog with the same kind, it will not create a new record
 
 ```js
 const dogNewton = await Dogs.create({
-  name: "Newton",
-  birth: "2019-10-06",
-  kind: {
-    id: 1,
-    name: "Labrador",
-  },
+   name: "Newton",
+   birth: "2019-10-06",
+   kind: {
+      id: 1,
+      name: "Labrador",
+   },
 }).populate('kind').exec();
 
 // strictly the same as :
 const dogNewtonBis = await Dogs.create({
-  name: "Newton",
-  birth: "2019-10-06",
-  kindId: 1,
+   name: "Newton",
+   birth: "2019-10-06",
+   kindId: 1,
 }).populate('kind').exec();
 
 // dogNewton = dogNewtonBis = {
-//   id: 2,
-//   name: "Jazz",
-//   kindId: 1,
-//   kind: {
-//     id: 1,
-//     name: "Labrador",
-//   },
+//    id: 2,
+//    name: "Jazz",
+//    kindId: 1,
+//    kind: {
+//       id: 1,
+//       name: "Labrador",
+//    },
 // }
 ```
 
@@ -239,8 +239,8 @@ const dog2 = await Dogs.findone({ id: 1 }).exec();
 // if you pass an object, the keys are the attributes of the
 // model and the values are the values to search :
 const dog3 = await Dogs.findone(
-  { name: "Rex", birth:"2019-10-06" }
-  ).exec();
+   { name: "Rex", birth:"2019-10-06" }
+   ).exec();
 // the first argument is the string after the where clause and
 // the second argument is an array of values to replace 
 // the ? in the string :
@@ -250,10 +250,10 @@ const dog4 = await Dogs.findone(
 	).exec(); 
 
 // dog1 = dog2 = dog3 = dog4 = {
-//   id: 1,
-//   name: "Rex",
-//   birth: "2019-10-06",
-//   kindId: 0,
+//    id: 1,
+//    name: "Rex",
+//    birth: "2019-10-06",
+//    kindId: 0,
 // }
 ```
 
@@ -263,14 +263,14 @@ const dog4 = await Dogs.findone(
 const dog1 = await Dogs.findone(1).populate('kind').exec();
 
 // dog1 = {
-//   id: 1,
-//   name: "Rex",
-//   birth: "2019-10-06",
-//   kindId: 1,
-//   kind: {
-//     id: 1,
-//     name: "Labrador",
-//   },
+//    id: 1,
+//    name: "Rex",
+//    birth: "2019-10-06",
+//    kindId: 1,
+//    kind: {
+//       id: 1,
+//       name: "Labrador",
+//    },
 // }
 ```
 
@@ -284,29 +284,29 @@ const dogs1 = await Dogs.find().exec();
 // find all records with the kindId=1
 const dogs2 = await Dogs.find({ kindId: 1 }).exec();
 const dogs3 = await Dogs.find(
-  "kindId=? AND (name like ? OR name like ?)", 
-  [1, "Jazz", "%e%"]
-  ).exec();
+   "kindId=? AND (name like ? OR name like ?)", 
+   [1, "Jazz", "%e%"]
+   ).exec();
 
 // dogs1 = dogs2 = dogs3 = [
+//    {
+//       id: 1,
+//       name: "Rex",
+//       birth: "2019-10-06",
+//       kindId: 1,
+//    },
+//    {
+//       id: 2,
+//       name: "Jazz",
+//       birth: "2019-10-06",
+//       kindId: 1,
+//    },
 //   {
-//     id: 1,
-//     name: "Rex",
-//     birth: "2019-10-06",
-//     kindId: 1,
-//   },
-//   {
-//     id: 2,
-//     name: "Jazz",
-//     birth: "2019-10-06",
-//     kindId: 1,
-//   },
-//  {
-//     id: 3,
-//     name: "Newton",
-//     birth: "2019-10-06",
-//     kindId: 1,
-//   }
+//       id: 3,
+//       name: "Newton",
+//       birth: "2019-10-06",
+//       kindId: 1,
+//    }
 // ]
 ```
 
@@ -319,36 +319,36 @@ const dogs1 = await Dogs.find().populate("kind").exec();
 const dogs2 = await Dogs.find().populateAll().exec();
 
 // dogs1 = dogs2 = [
+//    {
+//       id: 1,
+//       name: "Rex",
+//       birth: "2019-10-06",
+//       kindId: 1,
+//       kind: {
+//          id: 1,
+//          name: "Labrador",
+//       }
+//    },
+//    {
+//       id: 2,
+//       name: "Jazz",
+//       birth: "2019-10-06",
+//       kindId: 1,
+//       kind: {
+//          id: 1,
+//          name: "Labrador",
+//       }
+//    },
 //   {
-//     id: 1,
-//     name: "Rex",
-//     birth: "2019-10-06",
-//     kindId: 1,
-//     kind: {
-//       id: 1,
-//       name: "Labrador",
-//     }
-//   },
-//   {
-//     id: 2,
-//     name: "Jazz",
-//     birth: "2019-10-06",
-//     kindId: 1,
-//     kind: {
-//       id: 1,
-//       name: "Labrador",
-//     }
-//   },
-//  {
-//     id: 3,
-//     name: "Newton",
-//     birth: "2019-10-06",
-//     kindId: 1,
-//     kind: {
-//       id: 1,
-//       name: "Labrador",
-//     }
-//   }
+//       id: 3,
+//       name: "Newton",
+//       birth: "2019-10-06",
+//       kindId: 1,
+//       kind: {
+//          id: 1,
+//          name: "Labrador",
+//       }
+//    }
 // ]
 ```
 
@@ -360,29 +360,29 @@ let dogRexy2 = Dogs.updateone({ name: "Roxy" }, { name: "Rexy" }).exec();
 let dogRexy3 = Dogs.updateone("id=?",[1], { name: "Rexy" }).exec();
 
 // dogRexy1 = dogRexy2 = dogRexy3 = {
-//   id: 1,
-//   name: "Rexy",
-//   birth: "2019-10-06",
-//   kindId: 1,
+//    id: 1,
+//    name: "Rexy",
+//    birth: "2019-10-06",
+//    kindId: 1,
 // }
 
 let dogRexy = Dogs.updateone(1, { 
-  name: "Rexy",
-  kind: {
-    id: 1,
-    name: "Labrador 2",
-  }
+   name: "Rexy",
+   kind: {
+      id: 1,
+      name: "Labrador 2",
+   }
 }).populate('kind').exec();
 
 // dogRexy = {
-//   id: 1,
-//   name: "Rexy",
-//   birth: "2019-10-06",
-//   kindId: 1,
-//   kind: {
-//     id: 1,
-//     name: "Labrador 2",
-//   },
+//    id: 1,
+//    name: "Rexy",
+//    birth: "2019-10-06",
+//    kindId: 1,
+//    kind: {
+//       id: 1,
+//       name: "Labrador 2",
+//    },
 // }
 
 ```
@@ -416,18 +416,18 @@ Dogs.delete("kindId=?",[1]).exec();
 import { MorphineDb } from "morphine-orm";
 
 const dogs = await MorphineDb.query(
-  "SELECT * FROM Dogs WHERE name=? && kindId=?",
-  ["Roxy", 1]
-  ).exec();
+   "SELECT * FROM Dogs WHERE name=? && kindId=?",
+   ["Roxy", 1]
+   ).exec();
 
 // always returns an array of objects
 // dogs = [
-//   {
-//     id: 1,
-//     name: "Roxy",
-//     birth: "2019-10-06",
-//     kindId: 1,
-//   },
+//    {
+//       id: 1,
+//       name: "Roxy",
+//       birth: "2019-10-06",
+//       kindId: 1,
+//    },
 // ]
 
 ```
@@ -438,23 +438,23 @@ const dogs = await MorphineDb.query(
 
 const dog = await Dogs.createEmpty();
 // dog = {
-//   id: 0,
-//   name: "",
-//   birth: "0000-00-00",
-//   kindId: 0,
+//    id: 0,
+//    name: "",
+//    birth: "0000-00-00",
+//    kindId: 0,
 // }
 
 // select only some attributes
 const dogs = await Dogs.find().select(["name", "birth"]).exec();
 // dogs = [
-//   {
-//     name: "Rex",
-//     birth: "2019-10-06",
-//   },
-//   {
-//     name: "Jazz",
-//     birth: "2019-10-06",
-//   },
+//    {
+//       name: "Rex",
+//       birth: "2019-10-06",
+//    },
+//    {
+//       name: "Jazz",
+//       birth: "2019-10-06",
+//    },
 // ]
 
 
@@ -472,30 +472,30 @@ const exists = await Dogs.exists("id=?",[1]).exec();
 // get the attributes of a model
 const kindsAttributes = Kinds.getAttributes();
 // kindsAttributes = {
-//   id: {
-//     type: "integer",
-//     autoincrement: true,
-//     primary: true,
-//   },
-//   name: {
-//     type: "string",
-//     defaultsTo: "",
-//     index: true,
-//   },
+//    id: {
+//       type: "integer",
+//       autoincrement: true,
+//       primary: true,
+//    },
+//    name: {
+//       type: "string",
+//       defaultsTo: "",
+//       index: true,
+//    },
 // }
 
 const kindsAttributesEntries = Kinds.getAttributesEntries();
 // kindsAttributesEntries = [
-//   ["id", {
-//     type: "integer",
-//     autoincrement: true,
-//     primary: true,
-//   }],
-//   ["name", {
-//     type: "string",
-//     defaultsTo: "",
-//     index: true,
-//   }],
+//    ["id", {
+//       type: "integer",
+//       autoincrement: true,
+//       primary: true,
+//    }],
+//    ["name", {
+//       type: "string",
+//       defaultsTo: "",
+//       index: true,
+//    }],
 // ]
 
 ```
