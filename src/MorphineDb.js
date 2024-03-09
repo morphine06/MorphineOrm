@@ -162,6 +162,9 @@ const MorphineDb = new (class {
 				}
 				if (tocreate && (link.val.onDelete || link.val.onUpdate)) {
 					// console.log("6");
+					// warning remet à null les valeurs qui ne sont pas dans la table liée
+					await this.connection.query(`UPDATE \`${model.def.tableName}\` SET \`${link.key}\` = NULL WHERE \`${link.key}\` NOT IN (SELECT \`${this.models[link.val.model].primary}\` FROM \`${this.models[link.val.model].def.tableName}\`)`);
+
 					let q = "";
 					if (this.config.type == "pg") {
 						q = `ALTER TABLE ${model.def.tableName} ADD CONSTRAINT ${model.def.tableName}_${this.models[link.val.model].def.tableName}_${link.key}_fk FOREIGN KEY (${link.key}) REFERENCES ${this.models[link.val.model].def.tableName} (${this.models[link.val.model].primary})`;
