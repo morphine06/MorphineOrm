@@ -553,13 +553,15 @@ function Model(models = []) {
 	};
 }
 
-async function loadModels() {
+async function loadModels(dir) {
 	// console.log("loadModels");
 	// let d = new Date();
 	// let where = "/models";
 	// if (Config.app.mode == "production") where = "/lib";
 	// console.log("process.cwd() + where", process.cwd() + where);
-	let files = globule.find(`${process.cwd()}${path.sep}models${path.sep}**${path.sep}*.model.js`);
+	if (!dir) dir = `${process.cwd()}${path.sep}models${path.sep}**${path.sep}*.model.js`;
+	else dir = `${dir}${path.sep}**${path.sep}*.model.js`;
+	let files = globule.find(dir);
 	console.warn(clc.yellow("@Info - Models availables :"));
 	// console.log("d1b = ", new Date() - d);
 	// d = new Date();

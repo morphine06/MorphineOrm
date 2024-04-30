@@ -133,6 +133,7 @@ import { MorphineDb, loadModels } from "morphine-orm";
 const { MorphineDb, loadModels } = require("morphine-orm");
 
 await MorphineDb.init({
+   type: "mysql2", // mysql2, pg, sqlite3, mssql
    host: process.env.DBHOST,
    user: process.env.DBUSER,
    password: process.env.DBPASSWORD,
