@@ -67,8 +67,11 @@ const MorphineDb = new (class {
 			};
 		} else {
 			const mysql = require("mysql2/promise");
+			const con = { ...config };
+			delete con.migrate;
+			delete con.type;
 			const pool = mysql.createPool({
-				...config,
+				...con,
 				host: this.config.host || "localhost",
 				user: this.config.user || "root",
 				password: this.config.password || "",
