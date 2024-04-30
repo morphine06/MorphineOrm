@@ -370,7 +370,7 @@ const MorphineDb = new (class {
 		}
 	}
 	_ormTypeToDatabaseType(field, info = "type") {
-		console.log("🚀 ~ file: MorphineDb.js:369 ~ _ormTypeToDatabaseType ~ field:", field);
+		// console.log("🚀 ~ file: MorphineDb.js:369 ~ _ormTypeToDatabaseType ~ field:", field);
 		let typeJS = "";
 		let ormtype = field.type.toLowerCase();
 		let ormlength = field.length;

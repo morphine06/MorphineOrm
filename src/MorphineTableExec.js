@@ -501,7 +501,7 @@ class MorphineTableExec {
 			if (field.type == "datetime" && this.data[fieldName]) {
 				this.data[fieldName] = dayjs(this.data[fieldName]).format("YYYY-MM-DD HH:mm:ss");
 			}
-			console.log("this.data[fieldName]", fieldName, this.data[fieldName]);
+			// console.log("this.data[fieldName]", fieldName, this.data[fieldName]);
 			if (field.type == "date" && this.data[fieldName] != undefined) {
 				let m = dayjs(this.data[fieldName]);
 				if (!this.data[fieldName] || this.data[fieldName] == "0000-00-00" || this.data[fieldName] == "" || !m.isValid()) {
@@ -662,7 +662,7 @@ class MorphineTableExec {
 				}
 			}
 		}
-		console.log("🚀 ~ file: MorphineTableExec.js:648 ~ MorphineTableExec ~ _validate ~ errors:", errors);
+		// console.log("🚀 ~ file: MorphineTableExec.js:648 ~ MorphineTableExec ~ _validate ~ errors:", errors);
 		return errors;
 	}
 	async exec(returnCompleteRow = true) {
