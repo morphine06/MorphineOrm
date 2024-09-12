@@ -200,7 +200,7 @@ const MorphineDb = new (class {
 					" " +
 					this._ormTypeToDatabaseType(field) +
 					this._getNotnull(field) +
-					this._getIndex(field) +
+					this._getIndex(field, false) +
 					this._getDefault(field, fieldName),
 				);
 			}
@@ -265,7 +265,7 @@ const MorphineDb = new (class {
 					" " +
 					this._ormTypeToDatabaseType(field) +
 					this._getNotnull(field) +
-					this._getIndex(field) +
+					this._getIndex(field, true) +
 					this._getDefault(field, fieldName);
 				console.warn(clc.yellow("info:"), q);
 				await this.connection.query(q);
@@ -284,6 +284,7 @@ const MorphineDb = new (class {
 					" " +
 					this._ormTypeToDatabaseType(field) +
 					this._getNotnull(field) +
+					this._getIndex(field, true) +
 					this._getDefault(field, fieldName);
 				if (this.config.type == "sqlite3") {
 					console.warn(clc.yellow(`info: Field ${def.tableName}.${fieldName} has changed but impossible to modify field in sqlite3`), q);
@@ -302,7 +303,7 @@ const MorphineDb = new (class {
 					" " +
 					this._ormTypeToDatabaseType(field) +
 					this._getNotnull(field) +
-					this._getIndex(field) +
+					this._getIndex(field, true) +
 					this._getDefault(field, fieldName);
 				if (this.config.type == "sqlite3") {
 					console.warn(clc.yellow(`info: Field ${def.tableName}.${fieldName} has changed but impossible to modify field in sqlite3`), q);
@@ -486,9 +487,9 @@ const MorphineDb = new (class {
 		if (info == "typejs") return typeJS;
 		return res;
 	}
-	_getIndex(field) {
+	_getIndex(field, isAlter = false) {
 		let res = [];
-		if (field.primary) {
+		if (!isAlter && field.primary) {
 			if (this.config.type == "pg") res.push("SERIAL UNIQUE");
 			else res.push("PRIMARY KEY");
 		}
