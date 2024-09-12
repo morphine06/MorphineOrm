@@ -1,6 +1,6 @@
 {
   "name": "morphine-orm",
-  "version": "0.6.11",
+  "version": "0.6.3",
   "description": "Orm for Nodejs",
   "main": "index.js",
   "directories": {
