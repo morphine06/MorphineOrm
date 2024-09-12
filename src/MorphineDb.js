@@ -250,7 +250,9 @@ const MorphineDb = new (class {
 			}
 			// console.log("nullChanged", nullChanged, def.tableName, fieldName);
 			if (type1) {
-				type1 = type1.replace(/\(.*\)/, "");
+				// type1 = type1.replace(/\(.*\)/, "");
+				// if (type1.indexOf("(") <0) type1 = type1.substring(0, type1.indexOf("("));
+				if (type1.toLowerCase() == "int") type1 = "int(11)";
 			}
 			if (type2 === null) {
 				if (field.model) {
