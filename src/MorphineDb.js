@@ -249,8 +249,9 @@ const MorphineDb = new (class {
 				}
 			}
 			// console.log("nullChanged", nullChanged, def.tableName, fieldName);
-			// if (nullChanged)
-
+			if (type1) {
+				type1 = type1.replace(/\(.*\)/, "");
+			}
 			if (type2 === null) {
 				if (field.model) {
 					let f = this._getJoinedModel(field);
@@ -272,7 +273,7 @@ const MorphineDb = new (class {
 			} else if (
 				type1 &&
 				type2 &&
-				(type1.toLowerCase() != type2.toLowerCase() || (def2 != field.defaultsTo && type1.toLowerCase() != "text"))
+				((type1.toLowerCase() != type2.toLowerCase()) || (def2 != field.defaultsTo && type1.toLowerCase() != "text"))
 			) {
 				let q =
 					"ALTER TABLE " +
