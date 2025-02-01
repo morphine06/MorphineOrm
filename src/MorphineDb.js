@@ -14,18 +14,20 @@ const MorphineDb = new (class {
 		if (!this.config.migrate) this.config.migrate = "safe";
 		if (!this.config.debug) this.config.debug = false;
 		if (!this.config.type) this.config.type = "mysql2";
+		if (!this.config.catchError) this.config.catchError = false;
 
 		if (this.config.type == "sqlite3") {
 			const sqlite3 = require("sqlite3").verbose();
 			const db = new sqlite3.Database(this.config.database + ".sqlite");
 			this.connection = {
 				db: db,
-				query: async function (sql, sqlData = [], catchError = false) {
+				catchError: this.config.catchError,
+				query: async function (sql, sqlData = []) {
 					return new Promise((resolve, reject) => {
-						this.db.all(sql, sqlData, function (err, rows) {
+						this.db.all(sql, sqlData, (err, rows) => {
 							// console.log("🚀 ~ file: MorphineDb.js:61 ~ rows:", sql, sqlData, rows)
 							if (err) {
-								if (catchError) reject(err);
+								if (this.catchError) reject(err);
 								else {
 									console.warn(clc.red("sql-error"), err, sql, sqlData);
 									resolve(null);
@@ -48,7 +50,8 @@ const MorphineDb = new (class {
 			await client.connect();
 			this.connection = {
 				client: client,
-				query: async function (sql, sqlData = [], catchError = false) {
+				catchError: this.config.catchError,
+				query: async function (sql, sqlData = []) {
 					//replace ? by $1, $2, $3, ...
 					let i = 1;
 					while (sql.indexOf("?") != -1) {
@@ -59,7 +62,7 @@ const MorphineDb = new (class {
 						let results = await this.client.query(sql, sqlData);
 						return results.rows;
 					} catch (error) {
-						if (catchError) throw error;
+						if (this.catchError) throw error;
 						console.warn(clc.red("sql-error"), error, sql, sqlData);
 						return null;
 					}
@@ -70,6 +73,10 @@ const MorphineDb = new (class {
 			const con = { ...config };
 			delete con.migrate;
 			delete con.type;
+			delete con.catchError;
+			delete con.engine;
+			delete con.collation;
+			delete con.debug;
 			const pool = mysql.createPool({
 				...con,
 				host: this.config.host || "localhost",
@@ -80,7 +87,8 @@ const MorphineDb = new (class {
 			});
 			this.connection = {
 				pool: pool,
-				query: async function (sql, sqlData = [], catchError = false) {
+				catchError: this.config.catchError,
+				query: async function (sql, sqlData = []) {
 					let connection;
 					try {
 						connection = await this.pool.getConnection();
@@ -95,7 +103,7 @@ const MorphineDb = new (class {
 						return results[0];
 					} catch (error) {
 						connection.release();
-						if (catchError) throw error;
+						if (this.catchError) throw error;
 						console.warn(clc.red("sql-error"), error, sql, sqlData);
 						return null;
 						// } finally {
@@ -106,8 +114,8 @@ const MorphineDb = new (class {
 		}
 	}
 
-	async query(sql, sqlData = [], catchError = false) {
-		return await this.connection.query(sql, sqlData, catchError);
+	async query(sql, sqlData = []) {
+		return await this.connection.query(sql, sqlData);
 	}
 
 	async constraints(model) {
@@ -205,7 +213,10 @@ const MorphineDb = new (class {
 				);
 			}
 		}
-		let q = `CREATE TABLE IF NOT EXISTS ${def.tableName} (${what.join(", ")})`;
+		const engine = def.engine ? def.engine : this.config.engine ? this.config.engine : "InnoDB";
+		const collation = def.collation ? def.collation : this.config.collation ? this.config.collation : "utf8mb4_general_ci";
+		const charset = collation.split("_")[0];
+		let q = `CREATE TABLE IF NOT EXISTS ${def.tableName} (${what.join(", ")}) ENGINE=${engine} DEFAULT CHARSET=${charset} COLLATE=${collation}`;
 		console.warn(clc.yellow("info:"), q);
 		await this.connection.query(q, [], true);
 	}
@@ -560,8 +571,8 @@ function Model(models = []) {
 	};
 }
 
-async function loadModels(dir) {
-	// console.log("loadModels");
+async function loadModels(dir, silently = false) {
+	console.log("loadModels");
 	// let d = new Date();
 	// let where = "/models";
 	// if (Config.app.mode == "production") where = "/lib";

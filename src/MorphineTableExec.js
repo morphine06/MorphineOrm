@@ -24,9 +24,9 @@ class MorphineTableExec {
 		this.groupby = "";
 		this.tabAlreadyIncluded = {};
 		this.logQuery = false;
-		this.catchErr = false;
+		// this.catchErr = false;
 		this.iscount = false;
-		this.tabOriginalsPopulate = [];
+		this.originalPopulate = [];
 		// this.swallowerror = false;
 		this.joinModels = [{ modelname: this.modelname, fieldJoin: null, modelnameto: null, modelalias: this.modelname }];
 		for (const [fieldName, field] of Object.entries(this.def.attributes)) {
@@ -38,6 +38,7 @@ class MorphineTableExec {
 		}
 	}
 	select(fields) {
+		if (typeof fields == "string") fields = fields.split(",").map((f) => f.trim());
 		this.selected = fields;
 		return this;
 	}
@@ -76,8 +77,8 @@ class MorphineTableExec {
 		} else {
 			this.whereData = whereData;
 		}
-		this.original_where = this.cloneDeep(where);
-		this.original_whereData = this.cloneDeep(this.whereData);
+		this.originalWhere = this.cloneDeep(where);
+		this.originalWhereData = this.cloneDeep(this.whereData);
 		this.whereData = [];
 
 		this.onlyOne = false;
@@ -145,19 +146,20 @@ class MorphineTableExec {
 		this.logQuery = true;
 		return this;
 	}
-	swallowError() {
-		this.catchErr = false;
-		return this;
-	}
-	catchError() {
-		this.catchErr = true;
-		return this;
-	}
+	// swallowError() {
+	// 	this.catchErr = false;
+	// 	return this;
+	// }
+	// catchError() {
+	// 	this.catchErr = true;
+	// 	return this;
+	// }
 	returnRow(returnCompleteRow) {
 		this.returnCompleteRow = returnCompleteRow;
 		return this;
 	}
 	populateAll(exclude = [], maxlevel = 3) {
+		this.thenPopulateAll = { exclude, maxlevel };
 		let me = this;
 		function populateThis(table, origins, level) {
 			// eslint-disable-next-line
@@ -175,7 +177,7 @@ class MorphineTableExec {
 		return this;
 	}
 	populate(fieldJoin) {
-		this.tabOriginalsPopulate.push(fieldJoin);
+		this.originalPopulate.push(fieldJoin);
 		let tabFieldsJoins = fieldJoin.split(".");
 		let previousModelName = this.modelname;
 		let previousModelAlias = this.modelname;
@@ -268,7 +270,7 @@ class MorphineTableExec {
 				}
 			});
 			if (fromUpdate) {
-				this.whereData = this.whereData.concat(this.original_whereData);
+				this.whereData = this.whereData.concat(this.originalWhereData);
 			}
 		} else {
 			where += "1=1";
@@ -353,7 +355,7 @@ class MorphineTableExec {
 	async _createOrUpdateJoinedData() {
 		// create first the models to join
 		for (const [key, val] of Object.entries(this.def.attributes)) {
-			if (val.model && this.data[val.alias] && typeof this.data[val.alias] == "object" && this.tabOriginalsPopulate.indexOf(val.alias) >= 0) {
+			if (val.model && this.data[val.alias] && typeof this.data[val.alias] == "object" && this.originalPopulate.indexOf(val.alias) >= 0) {
 				let modelJoin = this.MorphineDb.models[val.model];
 				let modelJoinData = this.data[val.alias];
 				let createJoin = false, modifyJoin = false;
@@ -363,8 +365,8 @@ class MorphineTableExec {
 					else createJoin = true;
 				} else createJoin = true;
 				let tabNewJoins = [];
-				for (let iJoined = 0; iJoined < this.tabOriginalsPopulate.length; iJoined++) {
-					const toPopulate = this.tabOriginalsPopulate[iJoined];
+				for (let iJoined = 0; iJoined < this.originalPopulate.length; iJoined++) {
+					const toPopulate = this.originalPopulate[iJoined];
 					if (toPopulate.indexOf(val.alias + ".") >= 0) {
 						// mt.populate(toPopulate.replace(val.alias + ".", ""));
 						tabNewJoins.push(toPopulate.replace(val.alias + ".", ""));
@@ -428,7 +430,8 @@ class MorphineTableExec {
 				this.whereData.push(val);
 			}
 		}
-		let query = "UPDATE " + this.def.tableName + " SET " + vals.join(", ") + " WHERE " + this._createWhere(true);
+		// let query = "UPDATE " + this.def.tableName + " SET " + vals.join(", ") + " WHERE " + this._createWhere(true);
+		let query = `UPDATE ${this.def.tableName} AS ${this.modelname} SET ${vals.join(", ")} WHERE ${this._createWhere(true)}`;
 		return query;
 	}
 	// _createReplaceQuery() {
@@ -443,7 +446,7 @@ class MorphineTableExec {
 	// 	return query;
 	// }
 	_createDestroyQuery() {
-		let query = `DELETE FROM ${this.def.tableName} WHERE ${this._createWhere()}`;
+		let query = `DELETE FROM ${this.def.tableName} ${this.modelname} WHERE ${this._createWhere()}`;
 		return query;
 	}
 	_createTruncateQuery() {
@@ -674,13 +677,13 @@ class MorphineTableExec {
 				wData.push(this.data[this.primary]);
 			}
 			let query = "SELECT " + this.primary + " FROM " + this.def.tableName + " WHERE " + w;
-			rows = await this.connection.query(query, wData, this.catchErr);
+			rows = await this.connection.query(query, wData);
 			if (rows.length) {
 				this.command = "UPDATE";
 				this.where = this.primary + "=?";
 				this.whereData = [];
-				this.original_where = this.primary + "=?";
-				this.original_whereData = [rows[0][this.primary]];
+				this.originalWhere = this.primary + "=?";
+				this.originalWhereData = [rows[0][this.primary]];
 			} else {
 				this.command = "INSERT";
 				delete this.data[this.primary];
@@ -722,7 +725,7 @@ class MorphineTableExec {
 		if (this.def.debug || this.logQuery) console.warn(clc.yellow("query:"), query, this.whereData);
 		let rows;
 		// try {
-		rows = await this.connection.query(query, this.whereData, this.catchErr);
+		rows = await this.connection.query(query, this.whereData);
 		// } catch (error) {
 		// 	throw error;
 		// }
@@ -800,7 +803,14 @@ class MorphineTableExec {
 		if (this.def.debug) console.warn("res", res);
 		if (returnCompleteRow && (this.command == "UPDATE" || this.command == "INSERT")) {
 			if (this.command == "UPDATE") {
-				let rows2 = await this.table.find(this.original_where, this.original_whereData).exec();
+				let tableToExec = this.table.find(this.originalWhere, this.originalWhereData);
+				if (this.logQuery) tableToExec.debug();
+				// if (this.thenPopulateAll) tableToExec.populateAll(this.thenPopulateAll.exclude, this.thenPopulateAll.maxlevel);
+				// for (let iOp = 0; iOp < this.originalPopulate.length; iOp++) {
+				// 	const fieldJoin = this.originalPopulate[iOp];
+				// 	tableToExec.populate(fieldJoin);
+				// }
+				let rows2 = await tableToExec.exec();
 				if (this.onlyOne) return rows2[0];
 				return rows2;
 			}
@@ -811,8 +821,10 @@ class MorphineTableExec {
 					ftemp[this.modelname + "." + this.primary] = this.data[this.primary];
 				}
 				let tableToExec = this.table.findone(ftemp);
-				for (let iOp = 0; iOp < this.tabOriginalsPopulate.length; iOp++) {
-					const fieldJoin = this.tabOriginalsPopulate[iOp];
+				if (this.logQuery) tableToExec.debug();
+				if (this.thenPopulateAll) tableToExec.populateAll(this.thenPopulateAll.exclude, this.thenPopulateAll.maxlevel);
+				for (let iOp = 0; iOp < this.originalPopulate.length; iOp++) {
+					const fieldJoin = this.originalPopulate[iOp];
 					tableToExec.populate(fieldJoin);
 				}
 				let rows2 = await tableToExec.exec();
