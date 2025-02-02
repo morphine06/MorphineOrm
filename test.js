@@ -51,6 +51,7 @@ initApp().then(async () => {
 
 	await test("Test drop model", async () => {
 		try {
+			// test
 			await Animals.drop().exec();
 			await Breeds.drop().exec();
 			await Species.drop().exec();
@@ -165,6 +166,7 @@ initApp().then(async () => {
 		// before
 		await Species.create({ name: "Dog" }).exec();
 		await Species.create({ name: "Bird" }).exec();
+		// test
 		const animals = await Species.find().select("id, name").exec(); // or .select(["id", "name"])
 		assert.strictEqual(animals.length, 2);
 		assert.strictEqual(animals[0].createdAt, undefined);
@@ -284,17 +286,56 @@ initApp().then(async () => {
 		await truncateAll();
 	});
 
+	await test("Test beforeCreate() and beforeUpdate()", async () => {
+		// before
+		let species = await Species.create({ name: "Dog" }).exec();
+		let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+		// test
+		let animalCharly = await Animals.create({ name: "toto", breedId: breed.id }).exec();
+		assert.strictEqual(animalCharly.name, "toto not allowed");
+
+		let animalCharly2 = await Animals.updateone(animalCharly.id, { name: "toto not allowed" }).exec();
+		assert.strictEqual(animalCharly2.name, "toto");
+		// after
+		await truncateAll();
+	});
+
+	await test("Test virtuals fields", async () => {
+		// before
+		let species = await Species.create({ name: "Dog" }).exec();
+		let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+		// test
+		let birth = "2022-01-01";
+		let animalCharly = await Animals.create({ name: "Charly", breedId: breed.id, legs: 4, birth }).exec();
+		assert.strictEqual(animalCharly.age, new Date().getFullYear() - new Date(birth).getFullYear());
+		// after
+		await truncateAll();
+	});
+
+	await test("Personal test", async () => {
+		let species = await Species.create({ name: "Dog" }).exec();
+		let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+		let animalCharly = await Animals.create({ name: "Charly", breedId: breed.id, legs: 4, birth: "2022-01-01" }).exec();
+		console.log("🚀 ~ awaittest ~ animalCharly:", animalCharly);
+	});
 
 
-	// Il faudrait pouvoir faire ça !!!
+
+	// Il faudrait pouvoir faire ça !!! 
+	// Enfin... je ne sais pas... c'est peut-être pas nécessaire...
+	// ici le soucis c'est que comme on renomme Animals.name, on ne peut pas faire de populateAll() car il ne trouve plus sur le champ name
+	// il faudrait enregistrer les ID des champs modifiées pour pouvoir les retrouver après
 	// await test("Test update with populate", async () => {
-	// 	const dogCharly = await Animals.update("Animals.name='Charly 2'", {
-	// 		name: "Charly",
+	// 	// before
+	// 	let speciesDog1 = await Species.create({ name: "Dog" }).exec();
+	// 	let speciesDog2 = await Species.create({ name: "Dog" }).exec();
+	// 	// test
+	// 	const dogs = await Species.update("name='Dog'", {
+	// 		name: "Dog 2",
 	// 	}).populateAll().exec();
-	// 	console.log("🚀 ~ awaittest ~ dogCharly:", dogCharly);
-	// 	assert.strictEqual(dogCharly.id, 2);
-	// 	assert.strictEqual(dogCharly.name, "Charly");
-	// 	assert.strictEqual(dogCharly.species.name, "Dog 2");
+	// 	assert.strictEqual(dogs[0].name, "Dog 2");
+	// 	// after
+	// 	await truncateAll();
 	// });
 
 

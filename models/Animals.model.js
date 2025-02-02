@@ -1,5 +1,15 @@
 module.exports = function mymodel() {
 	return {
+		beforeUpdate: async function (data) {
+			if (data.name && data.name == "toto not allowed") {
+				data.name = "toto";
+			}
+		},
+		beforeCreate: async function (data) {
+			if (data.name && data.name == "toto") {
+				data.name = "toto not allowed";
+			}
+		},
 		tableName: "Animals2",
 		attributes: {
 			id: {
@@ -22,59 +32,21 @@ module.exports = function mymodel() {
 				notnull: false,
 				index: true,
 			},
+			legs: {
+				type: "integer",
+				defaultsTo: 2,
+			},
 			breedId: {
 				model: "Breeds",
 				alias: "breed",
 				onDelete: "RESTRICT", // RESTRICT, CASCADE, SET NULL,
 				onUpdate: "RESTRICT", // RESTRICT, CASCADE, SET NULL,
 			},
-			// size: {
-			// 	type: "string",
-			// 	defaultsTo: "",
-			// 	index: true,
-			// },
-			// attitude: {
-			// 	type: "string",
-			// 	defaultsTo: "",
-			// 	index: true,
-			// },
-			// sex: {
-			// 	type: "string",
-			// 	defaultsTo: "",
-			// 	index: true,
-			// },
-			// cote: {
-			// 	type: "string",
-			// 	defaultsTo: "",
-			// 	index: true,
-			// },
-			// biter: {
-			// 	type: "integer",
-			// 	defaultsTo: 0,
-			// },
-			// neutering: {
-			// 	type: "integer",
-			// 	defaultsTo: 0,
-			// },
-			// chip: {
-			// 	type: "integer",
-			// 	defaultsTo: 0,
-			// 	index: true,
-			// },
-			// therapy: {
-			// 	type: "string",
-			// 	defaultsTo: "",
-			// 	index: true,
-			// },
-			// pathologies: {
-			// 	type: "string",
-			// 	defaultsTo: "",
-			// 	index: true,
-			// },
-			// onhome: {
-			// 	type: "tinyint",
-			// 	defaultsTo: 0,
-			// },
+		},
+		virtuals: {
+			age: function () {
+				return new Date().getFullYear() - new Date(this.birth).getFullYear();
+			},
 		},
 	};
 };

@@ -326,6 +326,7 @@ class MorphineTableExec {
 				if (modelJoinData[modelJoin.primary]) {
 					const found = await new MorphineTableExec(modelJoin)
 						.findone(`${modelJoin.modelname}.${modelJoin.primary}=?`, [modelJoinData[modelJoin.primary]], modelJoinData)
+						.select(modelJoin.primary)
 						.exec();
 					if (found) modifyJoin = found; else createJoin = true;
 				} else createJoin = true;
@@ -337,19 +338,17 @@ class MorphineTableExec {
 					}
 				}
 
+				let mt;
 				if (createJoin) {
-					const mt = new MorphineTableExec(modelJoin).create(modelJoinData);
-					tabNewJoins.forEach(tp => mt.populate(tp));
-					const c = await mt.exec();
-					this.data[key] = c[modelJoin.primary];
+					mt = new MorphineTableExec(modelJoin).create(modelJoinData);
 				}
 				if (modifyJoin) {
-					const mt = new MorphineTableExec(modelJoin)
+					mt = new MorphineTableExec(modelJoin)
 						.updateone(`${modelJoin.modelname}.${modelJoin.primary}=?`, [modelJoinData[modelJoin.primary]], modelJoinData);
-					tabNewJoins.forEach(tp => mt.populate(tp));
-					const c = await mt.exec();
-					this.data[key] = c[modelJoin.primary];
 				}
+				tabNewJoins.forEach(tp => mt.populate(tp));
+				const c = await mt.exec();
+				this.data[key] = c[modelJoin.primary];
 			}
 		}
 	}
@@ -539,6 +538,19 @@ class MorphineTableExec {
 					}
 				}
 			});
+			if (this.def.virtuals) {
+				for (const [key, fn] of Object.entries(this.def.virtuals)) {
+					if (typeof fn == "function") {
+						try {
+							row[key] = fn.call(row);
+						} catch (e) {
+							row[key] = null;
+							console.warn("error in virtuals", e);
+						}
+					}
+					// Object.defineProperty(row, key, fn(row));
+				}
+			}
 		});
 		if (hasOneToMany) {
 			let rowsOk = [];
@@ -568,7 +580,7 @@ class MorphineTableExec {
 		switch (this.command) {
 			case "UPDATE":
 				// if (this.def.useUpdatedAt && !this.data.updatedAt) this.data.updatedAt = new Date();
-				if (this.def.useUpdatedAt) this.data.updatedAt = new Date();
+				if (this.def.useUpdatedAt && !this.data.ignoreUpdatedAt) this.data.updatedAt = dayjs();
 				if (this.data.updatedAtForced) this.data.updatedAt = this.data.updatedAtForced;
 				if (this.def.beforeUpdate) fn = this.def.beforeUpdate;
 				break;
@@ -578,8 +590,8 @@ class MorphineTableExec {
 			case "INSERT":
 				// if (this.def.useCreatedAt && !this.data.createdAt) this.data.createdAt = new Date();
 				// if (this.def.useUpdatedAt && !this.data.updatedAt) this.data.updatedAt = new Date();
-				if (this.def.useCreatedAt) this.data.createdAt = dayjs();
-				if (this.def.useUpdatedAt) this.data.updatedAt = dayjs();
+				if (this.def.useCreatedAt && !this.data.ignoreUpdatedAt) this.data.createdAt = dayjs();
+				if (this.def.useUpdatedAt && !this.data.ignoreUpdatedAt) this.data.updatedAt = dayjs();
 				if (this.data.createdAtForced) this.data.createdAt = this.data.createdAtForced;
 				if (this.data.updatedAtForced) this.data.updatedAt = this.data.updatedAtForced;
 				if (this.def.beforeCreate) fn = this.def.beforeCreate;
@@ -596,8 +608,8 @@ class MorphineTableExec {
 			default:
 				if (this.def.beforeSelect) fn = this.def.beforeSelect;
 		}
-		if (fn) await fn(this.data);
-		else if (fn2) await fn();
+		if (fn) await fn.call(this.data, this.data);
+		else if (fn2) await fn.call(this.data, this.data);
 	}
 	_validate() {
 		let errors = [];
@@ -684,7 +696,6 @@ class MorphineTableExec {
 		// }
 	}
 	async postTreatmentMain(rows, returnCompleteRow) {
-		// console.log("🚀 ~ file: MorphineTableExec.js:718 ~ postTreatmentMain ~ rows:", rows);
 		let res;
 		if (!rows) {
 			res = {};
@@ -695,12 +706,14 @@ class MorphineTableExec {
 				case "INSERT": res = null; break;
 				case "TRUNCATE": res = []; break;
 				case "DROP": res = null; break;
-				default: res = {}; break;
+				default: res = []; break;
 			}
 			return res;
 		}
 		switch (this.command) {
-			case "QUERY": res = rows; break;
+			case "QUERY":
+				res = rows;
+				break;
 			case "UPDATE":
 			case "DELETE":
 			case "TRUNCATE":
