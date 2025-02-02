@@ -31,6 +31,24 @@ async function initApp() {
 initApp().then(async () => {
 	const { Animals, Breeds, Species } = Models;
 
+	async function truncateAll() {
+		// await Species.truncate();
+		// await Breeds.truncate();
+		// await Animals.truncate();
+		let animals = await Animals.find().exec();
+		for (let animal of animals) {
+			await Animals.destroy(animal.id).exec();
+		}
+		let breeds = await Breeds.find().exec();
+		for (let breed of breeds) {
+			await Breeds.destroy(breed.id).exec();
+		}
+		let species = await Species.find().exec();
+		for (let specie of species) {
+			await Species.destroy(specie.id).exec();
+		}
+	}
+
 	await test("Test drop model", async () => {
 		try {
 			await Animals.drop().exec();
@@ -44,40 +62,190 @@ initApp().then(async () => {
 		}
 	});
 
-	await test("Test loadModels()", async () => {
+	await test("Test loadModels()", async (t) => {
+		// test
 		await loadModels();
 		const animals = await Animals.find().exec();
 		assert.strictEqual(animals.length, 0);
 	});
 
-	await test("Test create row", async () => {
-		const bird = await Species.create({ name: "Bird" }).exec(true);
-		assert.strictEqual(bird.name, "Bird");
+	await test("Test query()", async (t) => {
+		// before
+		await Species.create({ name: "Dog" }).exec();
+		await Species.create({ name: "Bird" }).exec();
+		// test
+		const animals = await Animals.query("SELECT * FROM " + Species.def.tableName).exec();
+		assert.strictEqual(animals.length, 2);
+		// after
+		await truncateAll();
 	});
 
-	await test("Test findone row with ID", async () => {
-		const bird = await Species.findone(1).exec(true);
+
+	await test("Test create() row", async (t) => {
+		// test
+		const bird = await Species.create({ name: "Bird" }).exec();
 		assert.strictEqual(bird.name, "Bird");
-	});
-	await test("Test findone row with query", async () => {
-		const bird = await Species.findone("name='Bird'").exec(true);
-		assert.strictEqual(bird.name, "Bird");
+		// after
+		await truncateAll();
 	});
 
-	await test("Test updateone row", async () => {
-		const bird = await Species.updateone(1, { name: "Bird 2" }).exec(true);
+	await test("Test count()", async (t) => {
+		// before
+		await Species.create({ name: "Bird" }).exec();
+		await Species.create({ name: "Bird" }).exec();
+		// test
+		const nbbirds = await Species.count({ name: "Bird" }).exec();
+		assert.strictEqual(nbbirds, 2);
+		// after
+		await truncateAll();
+	});
+
+	await test("Test findone() with ID integer", async () => {
+		// before
+		let species = await Species.create({ name: "Bird" }).exec();
+		// test
+		const bird = await Species.findone(species.id).exec();
+		assert.strictEqual(bird.name, "Bird");
+		// after
+		await truncateAll();
+	});
+
+	await test("Test findone() with query", async () => {
+		// before
+		await Species.create({ name: "Bird" }).exec();
+		// test
+		const bird = await Species.findone("name='Bird'").exec();
+		assert.strictEqual(bird.name, "Bird");
+		// after
+		await truncateAll();
+	});
+
+
+	await test("Test findone() with populate", async () => {
+		// before
+		let species = await Species.create({ name: "Dog" }).exec();
+		let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+		let animal = await Animals.create({ name: "Charly", breedId: breed.id }).exec();
+		// test
+		const dogCharly = await Animals.findone(animal.id).populate("breed").populate("breed.species").exec();
+		assert.strictEqual(dogCharly.id, animal.id);
+		assert.strictEqual(dogCharly.name, "Charly");
+		assert.strictEqual(dogCharly.breed.name, "Labrador");
+		assert.strictEqual(dogCharly.breed.species.name, "Dog");
+		// after
+		await truncateAll();
+	});
+
+	await test("Test findone() with onetomany", async () => {
+		// before
+		let species = await Species.create({ name: "Dog" }).exec();
+		let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+		await Animals.create({ name: "Charly", breedId: breed.id }).exec();
+		await Animals.create({ name: "Jazz", breedId: breed.id }).exec();
+		// test
+		let breeds = await Breeds.findone(breed.id).onetomany("Animals", "breed", "animals").populateAll().exec();
+		assert.strictEqual(breeds.animals.length, 2);
+		// after
+		await truncateAll();
+	});
+
+	await test("Test find()", async () => {
+		// before
+		await Species.create({ name: "Dog" }).exec();
+		await Species.create({ name: "Bird" }).exec();
+		await Species.create({ name: "Fish" }).exec();
+		// test
+		const species = await Species.find().exec();
+		assert.strictEqual(species.length, 3);
+		// after
+		await truncateAll();
+	});
+
+	await test("Test find() with selected", async () => {
+		// before
+		await Species.create({ name: "Dog" }).exec();
+		await Species.create({ name: "Bird" }).exec();
+		const animals = await Species.find().select("id, name").exec(); // or .select(["id", "name"])
+		assert.strictEqual(animals.length, 2);
+		assert.strictEqual(animals[0].createdAt, undefined);
+		// after
+		await truncateAll();
+	});
+
+	await test("Test find() with query in joined model", async () => {
+		// before
+		let species = await Species.create({ name: "Dog" }).exec();
+		let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+		let animalCharly = await Animals.create({ name: "Charly", breedId: breed.id }).exec();
+		let animalJazz = await Animals.create({ name: "Jazz", breedId: breed.id }).exec();
+		// test
+		const dogs = await Animals.find("breed.name=?", ["Labrador"]).populateAll().exec();
+		assert.strictEqual(dogs.length, 2);
+		let ok = 0;
+		for (let dog of dogs) {
+			if (dog.id === animalCharly.id && dog.name === "Charly" && dog.breed.id === breed.id && dog.breed.name === "Labrador") ok++;
+			if (dog.id === animalJazz.id && dog.name === "Jazz" && dog.breed.id === breed.id && dog.breed.name === "Labrador") ok++;
+		}
+		if (ok !== 2) assert.fail("Not all dogs found");
+		// after
+		await truncateAll();
+	});
+
+	await test("Test find() with onetomany", async () => {
+		// before
+		let species = await Species.create({ name: "Dog" }).exec();
+		let breedLabrador = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+		let breedChiwawa = await Breeds.create({ name: "Chiwawa", speciesId: species.id }).exec();
+		await Animals.create({ name: "Charly", breedId: breedLabrador.id }).exec();
+		await Animals.create({ name: "Rex", breedId: breedLabrador.id }).exec();
+		await Animals.create({ name: "Jazz", breedId: breedChiwawa.id }).exec();
+		// test
+		let breeds = await Breeds.find().onetomany("Animals", "breed", "animals").populateAll().exec();
+		assert.strictEqual(breeds.length, 2);
+		assert.strictEqual(breeds[0].animals.length, 2);
+		assert.strictEqual(breeds[1].animals.length, 1);
+		// after
+		await truncateAll();
+	});
+
+	await test("Test updateone() row", async () => {
+		// before
+		let species = await Species.create({ name: "Bird" }).exec();
+		// test
+		const bird = await Species.updateone(species.id, { name: "Bird 2" }).exec();
 		assert.strictEqual(bird.name, "Bird 2");
+		// after
+		await truncateAll();
 	});
 
-	await test("Test destroy row", async () => {
-		const fish = await Species.create({ name: "Fish" }).exec(true);
+	await test("Test updateone and populateAll()", async () => {
+		// before
+		let species = await Species.create({ name: "Dog" }).exec();
+		let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+		let animal = await Animals.create({ name: "Charly", breedId: breed.id }).exec();
+		// test
+		const dogCharly = await Animals.updateone(animal.id, {
+			name: "Charly 2",
+		}).populateAll().exec();
+		assert.strictEqual(dogCharly.id, animal.id);
+		assert.strictEqual(dogCharly.name, "Charly 2");
+		// after
+		await truncateAll();
+	});
+
+	await test("Test destroy() row", async () => {
+		// before
+		const fish = await Species.create({ name: "Fish" }).exec();
+		// test
 		await Species.destroy(fish.id).exec();
-		const bird = await Species.findone(fish.id).exec(true);
-		console.log("🚀 ~ awaittest ~ bird:", bird);
-		// assert.strictEqual(bird, undefined);
+		const fish2 = await Species.findone(fish.id).exec();
+		assert.strictEqual(fish2, null);
+		// after
+		await truncateAll();
 	});
 
-	await test("Test create nested", async () => {
+	await test("Test create() nested", async () => {
+		// test
 		const dogRex = await Animals.create({
 			name: "Rex",
 			breed: {
@@ -86,161 +254,49 @@ initApp().then(async () => {
 					name: "Dog",
 				},
 			},
-		}).populate("breed").populate("breed.species").exec(true);
+		}).populateAll().exec();
 		assert.strictEqual(dogRex.name, "Rex");
 		assert.strictEqual(dogRex.breed.name, "Labrador");
 		assert.strictEqual(dogRex.breed.species.name, "Dog");
+		// after
+		await truncateAll();
 	});
 
-	await test("Test create nested already exists and update", async () => {
+	await test("Test create() nested already exists and update", async () => {
+		// before
+		let species = await Species.create({ name: "Dog" }).exec();
+		// test
 		const dogCharly = await Animals.create({
 			name: "Charly",
 			breed: {
-				id: 1, // already exists
 				name: "Labrador",
 				species: {
-					id: 2, // already exists, should update
+					id: species.id, // already exists, should update
 					name: "Dog 2",
 				},
 			},
-		}).populate("breed").populate("breed.species").exec(true);
-		assert.strictEqual(dogCharly.id, 2);
+		}).populate("breed").populate("breed.species").exec();
 		assert.strictEqual(dogCharly.name, "Charly");
 		assert.strictEqual(dogCharly.breed.name, "Labrador");
 		assert.strictEqual(dogCharly.breed.species.name, "Dog 2");
+		assert.strictEqual(dogCharly.breed.species.id, species.id);
+		// after
+		await truncateAll();
 	});
 
 
-	await test("Test findone", async () => {
-		const dog2 = await Animals.findone(2).exec(true);
-		assert.strictEqual(dog2.name, "Charly");
-	});
-
-	await test("Test findone with populate", async () => {
-		const dog2 = await Animals.findone(2).populate("breed").populate("breed.species").exec(true);
-		assert.strictEqual(dog2.id, 2);
-		assert.strictEqual(dog2.name, "Charly");
-		assert.strictEqual(dog2.breed.name, "Labrador");
-		assert.strictEqual(dog2.breed.species.name, "Dog 2");
-	});
-
-	await test("Test find with query string", async () => {
-		const dogs = await Animals.find("breed.name=?", ["Labrador"]).populate("breed").populate("breed.species").exec(true);
-		assert.strictEqual(dogs.length, 2);
-		let dog2 = dogs[1];
-		assert.strictEqual(dog2.id, 2);
-		assert.strictEqual(dog2.name, "Charly");
-		assert.strictEqual(dog2.breed.name, "Labrador");
-		assert.strictEqual(dog2.breed.species.name, "Dog 2");
-	});
-
-	await test("Test find with where and populate", async () => {
-		const dogs = await Animals.find("breed.speciesId=?", [4]).populate("breed").populate("breed.species").exec(true);
-		assert.strictEqual(dogs.length, 2);
-		let dog2 = dogs[1];
-		assert.strictEqual(dog2.id, 2);
-		assert.strictEqual(dog2.name, "Charly");
-		assert.strictEqual(dog2.breed.name, "Labrador");
-		assert.strictEqual(dog2.breed.species.name, "Dog 2");
-	});
-
-	await test("Test find with query string and populateAll", async () => {
-		const dogs = await Animals.find("breed.speciesId=?", [4]).populateAll().exec(true);
-		assert.strictEqual(dogs.length, 2);
-		let dog2 = dogs[1];
-		assert.strictEqual(dog2.id, 2);
-		assert.strictEqual(dog2.name, "Charly");
-		assert.strictEqual(dog2.breed.name, "Labrador");
-		assert.strictEqual(dog2.breed.species.name, "Dog 2");
-	});
-
-	await test("Test find with onetomany", async () => {
-		let breeds = await Breeds.find().onetomany("Animals", "breed", "animals").populateAll().exec();
-		assert.strictEqual(breeds.length, 1);
-		let breed = breeds[0];
-		assert.strictEqual(breed.animals.length, 2);
-		assert.strictEqual(breed.name, "Labrador");
-		assert.strictEqual(breed.species.name, "Dog 2");
-	});
-
-	await test("Test find with selected", async () => {
-		const dogs = await Animals.find().select("id, name").exec(true); // or .select(["id", "name"])
-		assert.strictEqual(dogs.length, 2);
-		assert.strictEqual(dogs[0].breedId, undefined);
-	});
-
-
-
-	await test("Test updateone", async () => {
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		const dogCharly = await Animals.updateone(2, {
-			name: "Charly 2",
-		}).debug().exec(true);
-		assert.strictEqual(dogCharly.id, 2);
-		assert.strictEqual(dogCharly.name, "Charly 2");
-	});
-
-	await test("Test updateone and populateAll()", async () => {
-		const dogCharly = await Animals.updateone(2, {
-			name: "Charly 2",
-		}).populateAll().exec(true);
-		console.log("🚀 ~ awaittest ~ dogCharly:", dogCharly);
-		assert.strictEqual(dogCharly.id, 2);
-		assert.strictEqual(dogCharly.name, "Charly 2");
-	});
 
 	// Il faudrait pouvoir faire ça !!!
-	// await test("Test updateone with populate", async () => {
-	// 	const dogCharly = await Animals.update("name='Charly 2'", {
+	// await test("Test update with populate", async () => {
+	// 	const dogCharly = await Animals.update("Animals.name='Charly 2'", {
 	// 		name: "Charly",
-	// 	}).exec(true);
+	// 	}).populateAll().exec();
 	// 	console.log("🚀 ~ awaittest ~ dogCharly:", dogCharly);
 	// 	assert.strictEqual(dogCharly.id, 2);
 	// 	assert.strictEqual(dogCharly.name, "Charly");
 	// 	assert.strictEqual(dogCharly.species.name, "Dog 2");
 	// });
 
-
-
-
-	// // console.log("🚀 ~ file: test.js:26 ~ initApp ~ dogRex:", dogRex)
-
-	// let dogJazz = await Animals.create({
-	// 	name: "Jazz",
-	// 	breed: {
-	// 		name: "Fox Terrier",
-	// 		species: {
-	// 			id: 1,
-	// 			name: "Dog 2",
-	// 		},
-	// 	},
-	// }).populate("breed").populate("breed.species").exec(true);
-	// // console.log("🚀 ~ file: test.js:38 ~ initApp ~ dogJazz:", dogJazz)
-
-	// let dogCharly = await Animals.create({
-	// 	name: "Charly",
-	// 	breedId: 1,
-	// }).populate("breed").populate("breed.species").exec(true);
-	// // console.log("🚀 ~ file: test.js:26 ~ initApp ~ dogCharly:", dogCharly)
-
-
-	// let dog2 = await Animals.findone(2).populate("breed").populate("breed.species").exec(true);
-	// // console.log("🚀 ~ file: test.js:51 ~ initApp ~ dog2:", dog2)
-
-	// let dog2 = await Animals.findone({ id: 2 }).populateAll().exec(true);
-	// // console.log("🚀 ~ file: test.js:51 ~ initApp ~ dog2:", dog2)
-
-	// let dog3 = await Animals.findone("breed.name=?", ["Labrador"]).populate("breed").populate("breed.species").exec(true);
-	// // console.log("🚀 ~ file: test.js:51 ~ initApp ~ dog3:", dog3)
-
-	// const animals1 = await Animals.find().populate("breed").populate("breed.species").exec();
-	// // console.log("🚀 ~ file: test.js:61 ~ initApp ~ animals:", JSON.stringify(animals1, null, 2))
-
-	// const animals2 = await Animals.find({ "breed.speciesId": 1 }).populate("breed").populate("breed.species").exec();
-	// // console.log("🚀 ~ file: test.js:61 ~ initApp ~ animals:", JSON.stringify(animals2, null, 2))
-
-	// let breeds = await Breeds.find().debug().onetomany("Animals", "breed", "animals").populateAll().exec();
-	// console.log("🚀 ~ file: test.js:67 ~ initApp ~ breeds:", JSON.stringify(breeds, null, 2));
 
 });
 

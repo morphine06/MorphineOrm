@@ -14,8 +14,8 @@ class MorphineTableExec {
 		this.command = "SELECT";
 		this.returnCompleteRow = true;
 		this.primary = "id";
-		this.primaryType = "integer";
-		this.primaryLength = 11;
+		// this.primaryType = "integer";
+		// this.primaryLength = 11;
 		this.where = "";
 		this.whereData = [];
 		this.onlyOne = false;
@@ -32,8 +32,8 @@ class MorphineTableExec {
 		for (const [fieldName, field] of Object.entries(this.def.attributes)) {
 			if (field.primary) {
 				this.primary = fieldName;
-				this.primaryType = field.type;
-				this.primaryLength = field.length;
+				// this.primaryType = field.type;
+				// this.primaryLength = field.length;
 			}
 		}
 	}
@@ -57,8 +57,7 @@ class MorphineTableExec {
 	findone(where, whereData) {
 		this.onlyOne = true;
 		this.where = where;
-		if (whereData === undefined) this.whereData = [];
-		else this.whereData = whereData;
+		this.whereData = whereData === undefined ? [] : whereData;
 		return this;
 	}
 	create(data) {
@@ -126,17 +125,15 @@ class MorphineTableExec {
 
 
 	_searchModelFromFieldName(fieldJoin, fromModelName) {
-		let f = null,
-			// n = "",
+		let foundField = null,
 			isNotAlias = false;
-		for (const [fieldName, field] of Object.entries(this.MorphineDb.models[fromModelName].def.attributes)) {
-			if (field.model && (field.alias == fieldJoin || fieldName == fieldJoin)) {
-				f = field;
-				f.field = fieldName;
-				if (fieldName == fieldJoin) isNotAlias = true;
+		for (const [fieldName, fieldInfos] of Object.entries(this.MorphineDb.models[fromModelName].def.attributes)) {
+			if (fieldInfos.model && (fieldInfos.alias == fieldJoin || fieldName == fieldJoin)) {
+				foundField = { ...fieldInfos, field: fieldName };
+				isNotAlias = (fieldName === fieldJoin);
 			}
 		}
-		return { modeltolink: f, isNotAlias };
+		return { modeltolink: foundField, isNotAlias };
 	}
 	log() {
 		this.logQuery = true;
@@ -160,70 +157,61 @@ class MorphineTableExec {
 	}
 	populateAll(exclude = [], maxlevel = 3) {
 		this.thenPopulateAll = { exclude, maxlevel };
-		let me = this;
-		function populateThis(table, origins, level) {
-			// eslint-disable-next-line
-			for (const [field, defField] of Object.entries(table.def.attributes)) {
-				if (defField.model) {
-					if (exclude.indexOf(origins + defField.alias) >= 0) continue;
-					me.populate(origins + defField.alias);
-					level++;
-					if (level < maxlevel) populateThis(me.MorphineDb.models[defField.model], origins + defField.alias + ".", level);
+
+		const populateRec = (table, origins = "", level = 1) => {
+			for (const [, fieldInfos] of Object.entries(table.def.attributes)) {
+				if (!fieldInfos.model) continue;
+				if (exclude.includes(origins + fieldInfos.alias)) continue;
+				this.populate(origins + fieldInfos.alias);
+				if (level < maxlevel) {
+					populateRec(this.MorphineDb.models[fieldInfos.model], origins + fieldInfos.alias + ".", level + 1);
 				}
 			}
-		}
-		populateThis(this.table, "", 1);
-		//origins=[]
+		};
+
+		populateRec(this.table);
 		return this;
 	}
+
 	populate(fieldJoin) {
 		this.originalPopulate.push(fieldJoin);
-		let tabFieldsJoins = fieldJoin.split(".");
-		let previousModelName = this.modelname;
-		let previousModelAlias = this.modelname;
-		let tabOrigin = [];
-		for (let iJoin = 0; iJoin < tabFieldsJoins.length; iJoin++) {
-			let join = tabFieldsJoins[iJoin];
 
-			let { modeltolink, isNotAlias } = this._searchModelFromFieldName(join, previousModelName);
-			if (!modeltolink) {
-				console.warn(`The alias ${join} not found in table ${previousModelName}. Can't populate ${fieldJoin}.`);
-				break;
-			}
-			if (!modeltolink.alias) {
-				console.warn(`Alias name is mandatory for field ${modeltolink.field}`);
-				break;
-			}
-			if (isNotAlias) {
-				// console.warn(chalk.magenta(`It's better to indicate alias name '${modeltolink.alias}' rather field name ${join} to populate`));
-				join = modeltolink.alias;
-			}
-			let modelalias = this.modelname;
+		const parts = fieldJoin.split(".");
+		let prevModelName = this.modelname;
+		let prevModelAlias = this.modelname;
+		let tabOrigin = [];
+
+		for (const joinPart of parts) {
+			let { modeltolink, isNotAlias } = this._searchModelFromFieldName(joinPart, prevModelName);
+			if (!modeltolink || !modeltolink.alias) break;
+			let join = isNotAlias ? modeltolink.alias : joinPart;
+
 			tabOrigin.push(join);
-			if (!this.tabAlreadyIncluded[modeltolink.model + "__" + tabOrigin.join("_")]) {
-				modelalias = tabOrigin.join("__"); //+ modeltolink.alias
+			const key = modeltolink.model + "__" + tabOrigin.join("_");
+			let modelalias = this.tabAlreadyIncluded[key] || tabOrigin.join("__");
+
+			if (!this.tabAlreadyIncluded[key]) {
 				this.joinModels.push({
 					modelname: modeltolink.model,
 					modelalias: modeltolink.alias,
-					// modeltablename: this.MorphineDb.models[modeltolink.model].def.tableName,
 					modelid: this.MorphineDb.models[modeltolink.model].primary,
 					fieldJoin: modeltolink.field,
-					modelnameto: previousModelName,
-					modelaliasto: previousModelAlias,
-					// modeltablenameto: this.MorphineDb.models[previousModelName].def.tableName,
+					modelnameto: prevModelName,
+					modelaliasto: prevModelAlias,
 					modelidto: modeltolink.field,
 					origin: tabOrigin.join("."),
 					fieldJoinName: modeltolink.alias || null,
 				});
-				this.tabAlreadyIncluded[modeltolink.model + "__" + tabOrigin.join("_")] = modelalias;
-			} else {
-				modelalias = this.tabAlreadyIncluded[modeltolink.model + "__" + tabOrigin.join("_")];
+				this.tabAlreadyIncluded[key] = modelalias;
 			}
-			previousModelName = modeltolink.model;
-			previousModelAlias = modelalias;
+
+			prevModelName = modeltolink.model;
+			prevModelAlias = modelalias;
 		}
+
 		return this;
 	}
+
 	onetomany(modelJoin, fieldJoin, alias) {
 		// let tabFieldsJoins = fieldJoin.split(".");
 		let { modeltolink } = this._searchModelFromFieldName(fieldJoin, modelJoin);
@@ -254,136 +242,112 @@ class MorphineTableExec {
 		this.having = having;
 		return this;
 	}
+
 	_createWhere(fromUpdate) {
 		let where = "";
 		if (!this.where) {
 			where = "1=1";
 		} else if (Number.isInteger(this.where)) {
-			where += this.modelname + "." + this.primary + "=?";
+			where = `${this.modelname}.${this.primary}=?`;
 			this.whereData.push(this.where);
 		} else if (typeof this.where === "string") {
 			where = this.where;
-			this.joinModels.forEach((model, num) => {
+			this.joinModels.forEach(model => {
 				if (model.origin) {
-					let reg = new RegExp(model.origin, "gi");
+					const reg = new RegExp(model.origin, "gi");
 					where = where.replace(reg, model.modelalias);
 				}
 			});
 			if (fromUpdate) {
-				this.whereData = this.whereData.concat(this.originalWhereData);
+				this.whereData.push(...this.originalWhereData);
 			}
 		} else {
-			where += "1=1";
-			Object.entries(this.where).forEach(([key, val], index) => {
-				if (key.indexOf(".") < 0) key = this.modelname + "." + key;
-				where += " AND " + key + "=?";
+			where = "1=1";
+			Object.entries(this.where).forEach(([key, val]) => {
+				if (!key.includes(".")) key = `${this.modelname}.${key}`;
+				where += ` AND ${key}=?`;
 				this.whereData.push(val);
 			});
 		}
-
 		return where;
 	}
+
 	_createSelect() {
 		let tabSelect = [];
-		this.joinModels.forEach((model, num) => {
+		this.joinModels.forEach(model => {
 			for (const [fieldName] of Object.entries(this.MorphineDb.models[model.modelname].def.attributes)) {
-				let as = "";
-				if (model.modelnameto) as = " AS " + model.modelalias + "_" + model.fieldJoin + "_" + fieldName;
-				tabSelect.push(model.modelalias + "." + fieldName + as);
+				const as = model.modelnameto ? `AS ${model.modelalias}_${model.fieldJoin}_${fieldName}` : "";
+				tabSelect.push(`${model.modelalias}.${fieldName} ${as}`);
 			}
 		});
 		if (this.selected.length) tabSelect = this.selected;
 		return tabSelect.join(", ");
 	}
+
 	_createJoin() {
 		let tabJoin = [];
-
-		this.joinModels.forEach((model, num) => {
-			if (!model.modelnameto) tabJoin.push(this.MorphineDb.models[model.modelname].def.tableName + " " + model.modelalias);
-			else {
-				// if (model.isOneToMany) {
-				tabJoin.push(
-					"LEFT JOIN " +
-					this.MorphineDb.models[model.modelname].def.tableName +
-					" " +
-					model.modelalias +
-					" ON " +
-					model.modelalias +
-					"." +
-					model.modelid +
-					"=" +
-					model.modelaliasto +
-					"." +
-					model.modelidto,
-				);
-
-				// } else {
-				// 	tabJoin.push(
-				// 		"LEFT JOIN " +
-				// 		this.MorphineDb.models[model.modelname].def.tableName +
-				// 		" " +
-				// 		model.modelalias +
-				// 		" ON " +
-				// 		model.modelalias +
-				// 		"." +
-				// 		this.MorphineDb.models[model.modelname].primary +
-				// 		"=" +
-				// 		model.modelaliasto +
-				// 		"." +
-				// 		model.fieldJoin,
-				// 	);
-
-				// }
+		this.joinModels.forEach(model => {
+			if (!model.modelnameto) {
+				tabJoin.push(this.MorphineDb.models[model.modelname].def.tableName + " " + model.modelalias);
+			} else {
+				tabJoin.push(`LEFT JOIN ${this.MorphineDb.models[model.modelname].def.tableName} ${model.modelalias} ON ${model.modelalias}.${model.modelid}=${model.modelaliasto}.${model.modelidto}`);
 			}
 		});
 		return tabJoin.join(" ");
 	}
+
 	_createOrder() {
-		let order = "";
-		if (this.order) order = " ORDER BY " + this.order;
-		return order;
+		return this.order ? `ORDER BY ${this.order}` : "";
 	}
+
 	_createSelectQuery() {
-		let query = "SELECT " + this._createSelect() + " FROM " + this._createJoin() + " WHERE " + this._createWhere() + this._createOrder();
+		let query = `SELECT ${this._createSelect()} FROM ${this._createJoin()} WHERE ${this._createWhere()} ${this._createOrder()}`;
 		if (this.iscount) {
-			query =
-				"SELECT count(t1." + this.primary + ") as cmpt FROM " + this._createJoin() + " WHERE " + this._createWhere() + this._createOrder();
+			query = `SELECT count(${this.modelname}.${this.primary}) as cmpt FROM ${this._createJoin()} WHERE ${this._createWhere()} ${this._createOrder()}`;
 		}
 		return query;
 	}
 
 	async _createOrUpdateJoinedData() {
-		// create first the models to join
+		let hasObjectToCreateOrUpdate = false;
+		for (const [, val] of Object.entries(this.def.attributes)) {
+			if (val.model && this.data[val.alias] && typeof this.data[val.alias] === "object") {
+				hasObjectToCreateOrUpdate = true;
+				if (!this.originalPopulate.includes(val.alias)) this.populate(val.alias);
+			}
+		}
+		if (!hasObjectToCreateOrUpdate) return;
+
 		for (const [key, val] of Object.entries(this.def.attributes)) {
-			if (val.model && this.data[val.alias] && typeof this.data[val.alias] == "object" && this.originalPopulate.indexOf(val.alias) >= 0) {
-				let modelJoin = this.MorphineDb.models[val.model];
-				let modelJoinData = this.data[val.alias];
+			if (val.model && this.data[val.alias] && typeof this.data[val.alias] === "object" && this.originalPopulate.includes(val.alias)) {
+				const modelJoin = this.MorphineDb.models[val.model];
+				const modelJoinData = this.data[val.alias];
 				let createJoin = false, modifyJoin = false;
 				if (modelJoinData[modelJoin.primary]) {
-					let f = await (new MorphineTableExec(modelJoin)).findone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData).exec();
-					if (f) modifyJoin = f;
-					else createJoin = true;
+					const found = await new MorphineTableExec(modelJoin)
+						.findone(`${modelJoin.modelname}.${modelJoin.primary}=?`, [modelJoinData[modelJoin.primary]], modelJoinData)
+						.exec();
+					if (found) modifyJoin = found; else createJoin = true;
 				} else createJoin = true;
+
 				let tabNewJoins = [];
-				for (let iJoined = 0; iJoined < this.originalPopulate.length; iJoined++) {
-					const toPopulate = this.originalPopulate[iJoined];
-					if (toPopulate.indexOf(val.alias + ".") >= 0) {
-						// mt.populate(toPopulate.replace(val.alias + ".", ""));
+				for (const toPopulate of this.originalPopulate) {
+					if (toPopulate.includes(val.alias + ".")) {
 						tabNewJoins.push(toPopulate.replace(val.alias + ".", ""));
 					}
 				}
 
 				if (createJoin) {
-					let mt = (new MorphineTableExec(modelJoin)).create(modelJoinData);
-					tabNewJoins.map((toPopulate) => mt.populate(toPopulate));
-					let c = await mt.exec();
-					// console.log("🚀 ~ file: MorphineTableExec.js:378 ~ MorphineTableExec ~ _createOrUpdateJoinedData ~ c:", c);
+					const mt = new MorphineTableExec(modelJoin).create(modelJoinData);
+					tabNewJoins.forEach(tp => mt.populate(tp));
+					const c = await mt.exec();
 					this.data[key] = c[modelJoin.primary];
 				}
 				if (modifyJoin) {
-					let mt = (new MorphineTableExec(modelJoin)).updateone(modelJoin.primary + "=?", [modelJoinData[modelJoin.primary]], modelJoinData);
-					tabNewJoins.map((toPopulate) => mt.populate(toPopulate));
-					let c = await mt.exec();
+					const mt = new MorphineTableExec(modelJoin)
+						.updateone(`${modelJoin.modelname}.${modelJoin.primary}=?`, [modelJoinData[modelJoin.primary]], modelJoinData);
+					tabNewJoins.forEach(tp => mt.populate(tp));
+					const c = await mt.exec();
 					this.data[key] = c[modelJoin.primary];
 				}
 			}
@@ -391,46 +355,39 @@ class MorphineTableExec {
 	}
 
 	async _createInsertQuery() {
-		let fields = [],
-			vals = [];
+		let fields = [], vals = [];
+
 		for (const [key, val] of Object.entries(this.def.attributes)) {
 			if (val.primary && val.autoincrement) continue;
 			fields.push(key);
 			vals.push("?");
+
 			if (Object.prototype.hasOwnProperty.call(this.data, key)) {
 				this.whereData.push(this.data[key]);
 			} else {
-				if (val.defaultsTo) this.whereData.push(val.defaultsTo);
-				else {
-					if (
-						val.type == "int" ||
-						val.type == "integer" ||
-						val.type == "tinyint" ||
-						val.type == "smallint" ||
-						val.type == "mediumint" ||
-						val.type == "year" ||
-						val.type == "float" ||
-						val.type == "double" ||
-						val.type == "boolean"
-					)
-						this.whereData.push(0);
-					else this.whereData.push("");
-				}
+				let defaultValue = val.defaultsTo ??
+					(["int", "integer", "tinyint", "smallint", "mediumint", "year", "float", "double", "boolean"].includes(val.type)
+						? 0
+						: "");
+				this.whereData.push(defaultValue);
 			}
 		}
-		let query = "INSERT INTO " + this.def.tableName + "(" + fields.join(", ") + ") VALUES (" + vals.join(", ") + ")";
-		if (this.MorphineDb.config.type == "pg") query += " RETURNING " + this.primary;
+
+		let query = `INSERT INTO ${this.def.tableName} (${fields.join(", ")}) VALUES (${vals.join(", ")})`;
+		if (this.MorphineDb.config.type === "pg") {
+			query += ` RETURNING ${this.primary}`;
+		}
 		return query;
 	}
+
 	_createUpdateQuery() {
 		let vals = [];
 		for (const [key, val] of Object.entries(this.data)) {
 			if (this.def.attributes[key]) {
-				vals.push(key + "=?");
+				vals.push(`${this.modelname}.${key}=?`);
 				this.whereData.push(val);
 			}
 		}
-		// let query = "UPDATE " + this.def.tableName + " SET " + vals.join(", ") + " WHERE " + this._createWhere(true);
 		let query = `UPDATE ${this.def.tableName} AS ${this.modelname} SET ${vals.join(", ")} WHERE ${this._createWhere(true)}`;
 		return query;
 	}
@@ -460,75 +417,67 @@ class MorphineTableExec {
 		query = `DROP TABLE ${this.def.tableName}`;
 		return query;
 	}
+
 	_preTreatment() {
 		for (const [fieldName, field] of Object.entries(this.def.attributes)) {
-			if (field.type == "date" && this.data[fieldName] == undefined) {
-				if (this.MorphineDb.config.type == "pg") {
-					this.data[fieldName] = null;
-				} else {
-					this.data[fieldName] = "0000-00-00";
-				}
+			if (field.type === "date" && this.data[fieldName] === undefined) {
+				this.data[fieldName] = this.MorphineDb.config.type === "pg" ? null : "0000-00-00";
 				continue;
 			}
 
 			if (!fieldName || this.data[fieldName] === undefined) continue;
-			// if (this.data[fieldName]===null)
 
-			if (field.type == "json" && typeof this.data[fieldName] == "object") {
+			if (field.type === "json" && typeof this.data[fieldName] === "object") {
 				try {
 					this.data[fieldName] = JSON.stringify(this.data[fieldName]);
-				} catch (e) {
-					console.warn("json stringify error", e);
+				} catch {
 					this.data[fieldName] = "";
 				}
 			}
-			if (field.type == "json" && typeof this.data[fieldName] !== "object") {
+			if (field.type === "json" && typeof this.data[fieldName] !== "object") {
 				try {
 					this.data[fieldName] = JSON.parse(this.data[fieldName]);
-				} catch (e) {
-					// console.warn("json stringify error", e);
-				}
+				} catch {}
 				try {
 					this.data[fieldName] = JSON.stringify(this.data[fieldName]);
-				} catch (e) {
-					console.warn("json stringify error", e);
+				} catch {
 					this.data[fieldName] = "";
 				}
 			}
-			if (field.type == "boolean") {
-				if (this.data[fieldName] === false) this.data[fieldName] = 0;
-				if (this.data[fieldName] === true) this.data[fieldName] = 1;
-				if (this.data[fieldName] === "false") this.data[fieldName] = 0;
-				if (this.data[fieldName] === "true") this.data[fieldName] = 1;
+
+			if (field.type === "boolean") {
+				if (this.data[fieldName] === false || this.data[fieldName] === "false") this.data[fieldName] = 0;
+				if (this.data[fieldName] === true || this.data[fieldName] === "true") this.data[fieldName] = 1;
 			}
-			if (field.type == "datetime" && this.data[fieldName]) {
+
+			if (field.type === "datetime" && this.data[fieldName]) {
 				this.data[fieldName] = dayjs(this.data[fieldName]).format("YYYY-MM-DD HH:mm:ss");
 			}
-			// console.log("this.data[fieldName]", fieldName, this.data[fieldName]);
-			if (field.type == "date" && this.data[fieldName] != undefined) {
+
+			if (field.type === "date" && this.data[fieldName] !== undefined) {
 				let m = dayjs(this.data[fieldName]);
-				if (!this.data[fieldName] || this.data[fieldName] == "0000-00-00" || this.data[fieldName] == "" || !m.isValid()) {
-					if (this.MorphineDb.config.type == "pg") {
-						this.data[fieldName] = null;
-					} else {
-						this.data[fieldName] = "0000-00-00";
-					}
+				if (!this.data[fieldName] || this.data[fieldName] === "0000-00-00" || !m.isValid()) {
+					this.data[fieldName] = this.MorphineDb.config.type === "pg" ? null : "0000-00-00";
+				} else {
+					this.data[fieldName] = m.format("YYYY-MM-DD");
 				}
-				else this.data[fieldName] = m.format("YYYY-MM-DD");
 			}
-			if (field.type == "datetime" && this.data[fieldName]) {
+
+			if (field.type === "datetime" && this.data[fieldName]) {
 				let m = dayjs(this.data[fieldName]);
 				if (
-					this.data[fieldName] == "0000-00-00" ||
-					this.data[fieldName] == "0000-00-00 00:00:00" ||
-					this.data[fieldName] == "" ||
+					this.data[fieldName] === "0000-00-00" ||
+					this.data[fieldName] === "0000-00-00 00:00:00" ||
 					!m.isValid()
-				)
+				) {
 					this.data[fieldName] = "0000-00-00 00:00:00";
-				else this.data[fieldName] = m.format("YYYY-MM-DD HH:mm:ss");
+				} else {
+					this.data[fieldName] = m.format("YYYY-MM-DD HH:mm:ss");
+				}
 			}
 		}
 	}
+
 	_postTreatment(rows) {
 		let hasOneToMany = false;
 		rows.forEach((row) => {
@@ -550,7 +499,6 @@ class MorphineTableExec {
 			this.joinModels.forEach((model, num) => {
 				if (model.isOneToMany) {
 					hasOneToMany = true;
-					// return;
 				}
 				if (model.modelnameto) {
 					let obj = {};
@@ -572,6 +520,7 @@ class MorphineTableExec {
 							delete row[f];
 						}
 					}
+					// console.log("model.modelaliasto", model.modelaliasto);
 					if (model.fieldJoinName && model.modelaliasto == "t1") {
 						row[model.fieldJoinName] = obj;
 					} else {
@@ -611,8 +560,8 @@ class MorphineTableExec {
 			return rowsOk;
 		}
 		return rows;
-
 	}
+
 	async _beforeQuery() {
 		let fn = null,
 			fn2 = null;
@@ -668,6 +617,7 @@ class MorphineTableExec {
 		// console.log("🚀 ~ file: MorphineTableExec.js:648 ~ MorphineTableExec ~ _validate ~ errors:", errors);
 		return errors;
 	}
+
 	async exec(returnCompleteRow = true) {
 		if (this.command == "REPLACE") {
 			let w = "0",
@@ -739,43 +689,21 @@ class MorphineTableExec {
 		if (!rows) {
 			res = {};
 			switch (this.command) {
-				case "QUERY":
-					res = [];
-					break;
-				case "UPDATE":
-					res = null;
-					break;
-				case "DELETE":
-					res = 0;
-					break;
-				case "INSERT":
-					res = null;
-					break;
-				case "TRUNCATE":
-					res = [];
-					break;
-				case "DROP":
-					res = null;
-					break;
-				default:
-					res = {};
-					break;
+				case "QUERY": res = []; break;
+				case "UPDATE": res = null; break;
+				case "DELETE": res = 0; break;
+				case "INSERT": res = null; break;
+				case "TRUNCATE": res = []; break;
+				case "DROP": res = null; break;
+				default: res = {}; break;
 			}
 			return res;
 		}
 		switch (this.command) {
-			case "QUERY":
-				res = rows;
-				break;
+			case "QUERY": res = rows; break;
 			case "UPDATE":
-				res = rows.affectedRows;
-				break;
 			case "DELETE":
-				res = rows.affectedRows;
-				break;
 			case "TRUNCATE":
-				res = rows.affectedRows;
-				break;
 			case "DROP":
 				res = rows.affectedRows;
 				break;
@@ -801,36 +729,21 @@ class MorphineTableExec {
 				}
 		}
 		if (this.def.debug) console.warn("res", res);
-		if (returnCompleteRow && (this.command == "UPDATE" || this.command == "INSERT")) {
-			if (this.command == "UPDATE") {
-				let tableToExec = this.table.find(this.originalWhere, this.originalWhereData);
-				if (this.logQuery) tableToExec.debug();
-				// if (this.thenPopulateAll) tableToExec.populateAll(this.thenPopulateAll.exclude, this.thenPopulateAll.maxlevel);
-				// for (let iOp = 0; iOp < this.originalPopulate.length; iOp++) {
-				// 	const fieldJoin = this.originalPopulate[iOp];
-				// 	tableToExec.populate(fieldJoin);
-				// }
-				let rows2 = await tableToExec.exec();
-				if (this.onlyOne) return rows2[0];
-				return rows2;
-			}
-			if (this.command == "INSERT") {
+		if (returnCompleteRow && (this.command === "UPDATE" || this.command === "INSERT")) {
+			let tableToExec;
+			if (this.command === "UPDATE") {
+				tableToExec = this.table.find(this.originalWhere, this.originalWhereData);
+			} else {
 				let ftemp = {};
-				ftemp[this.modelname + "." + this.primary] = res;
-				if (!res) {
-					ftemp[this.modelname + "." + this.primary] = this.data[this.primary];
-				}
-				let tableToExec = this.table.findone(ftemp);
-				if (this.logQuery) tableToExec.debug();
-				if (this.thenPopulateAll) tableToExec.populateAll(this.thenPopulateAll.exclude, this.thenPopulateAll.maxlevel);
-				for (let iOp = 0; iOp < this.originalPopulate.length; iOp++) {
-					const fieldJoin = this.originalPopulate[iOp];
-					tableToExec.populate(fieldJoin);
-				}
-				let rows2 = await tableToExec.exec();
-				return rows2;
+				ftemp[this.modelname + "." + this.primary] = res || this.data[this.primary];
+				tableToExec = this.table.findone(ftemp);
 			}
-		} else return res;
+			if (this.logQuery) tableToExec.debug();
+			this.originalPopulate.forEach(fieldJoin => tableToExec.populate(fieldJoin));
+			let rows2 = await tableToExec.exec();
+			return this.onlyOne && this.command === "UPDATE" ? rows2[0] : rows2;
+		}
+		return res;
 	}
 }
 

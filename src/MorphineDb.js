@@ -11,10 +11,10 @@ const MorphineDb = new (class {
 	}
 	async init(config) {
 		this.config = config;
-		if (!this.config.migrate) this.config.migrate = "safe";
-		if (!this.config.debug) this.config.debug = false;
-		if (!this.config.type) this.config.type = "mysql2";
-		if (!this.config.catchError) this.config.catchError = false;
+		this.config.migrate ??= "safe";
+		this.config.debug ??= false;
+		this.config.type ??= "mysql2";
+		this.config.catchError ??= false;
 
 		if (this.config.type == "sqlite3") {
 			const sqlite3 = require("sqlite3").verbose();
@@ -86,7 +86,7 @@ const MorphineDb = new (class {
 				port: this.config.port || 3306,
 			});
 			this.connection = {
-				pool: pool,
+				pool,
 				catchError: this.config.catchError,
 				query: async function (sql, sqlData = []) {
 					let connection;
@@ -123,16 +123,10 @@ const MorphineDb = new (class {
 		for (const [fieldName, field] of Object.entries(model.def.attributes)) {
 			if (field.model) toLink.push({ key: fieldName, val: field });
 		}
-		// console.log("toLink", toLink);
 		if (toLink.length) {
-			// let d = new Date();
-			// console.log("1");
 			let q = `select * from information_schema.KEY_COLUMN_USAGE where TABLE_NAME='${model.def.tableName}' && TABLE_SCHEMA='${this.config.database}'`; //COLUMN_NAME, CONSTRAINT_NAME, REFERENCED_COLUMN_NAME, REFERENCED_TABLE_NAME
 			if (this.config.type == "pg") q = `select * from information_schema.constraint_column_usage where TABLE_NAME='${model.def.tableName}' AND CONSTRAINT_SCHEMA='${this.config.database}'`;
 			let actualConstraints = await this.connection.query(q);
-			// console.log("🚀 ~ file: MorphineDb.js:91 ~ constraints ~ actualConstraints:", actualConstraints)
-			// console.log("2", q, d - new Date());
-			// d = new Date();
 			for (let iLink = 0; iLink < toLink.length; iLink++) {
 				const link = toLink[iLink];
 
@@ -140,18 +134,12 @@ const MorphineDb = new (class {
 					todelete = false;
 				for (let iActualConstraint = 0; iActualConstraint < actualConstraints.length; iActualConstraint++) {
 					const actualConstraint = actualConstraints[iActualConstraint];
-					// console.log("🚀 ~ file: MorphineDb.js:100 ~ constraints ~ actualConstraint:", actualConstraint)
 					let q2 = `select * from information_schema.referential_constraints where \`CONSTRAINT_NAME\` like '${actualConstraint.CONSTRAINT_NAME}' AND TABLE_NAME='${model.def.tableName}' AND UNIQUE_CONSTRAINT_SCHEMA='${this.config.database}'`;
-					// console.log("3", q2, d - new Date());
-					// d = new Date();
 					let actualConstraintBis = (await this.connection.query(q2))[0];
-					// console.log("🚀 ~ file: MorphineDb.js:106 ~ constraints ~ actualConstraintBis:", actualConstraintBis)
 					if (!this.models[link.val.model]) {
 						console.warn(`Model not found : ${link.val.model}`);
 						continue;
 					}
-					// console.log("4", d - new Date());
-					// d = new Date();
 					if (
 						actualConstraint.COLUMN_NAME == link.key &&
 						actualConstraint.REFERENCED_TABLE_NAME == this.models[link.val.model].def.tableName
@@ -163,8 +151,6 @@ const MorphineDb = new (class {
 							tocreate = true;
 						}
 					}
-					// console.log("5", d - new Date());
-					// d = new Date();
 				}
 				if (todelete) {
 					let q = `ALTER TABLE \`${model.def.tableName}\` DROP FOREIGN KEY \`${todelete}\``;

@@ -7,16 +7,16 @@ class MorphineTable {
 		this.connection = MorphineDb.connection;
 		this.modelname = this.def.modelname;
 		this.primary = "";
-		this.primaryType = "integer";
-		this.primaryLength = 11;
+		// this.primaryType = "integer";
+		// this.primaryLength = 11;
 		this.primaryField = null;
 		for (const [fieldName, field] of Object.entries(this.def.attributes)) {
 			field.fieldName = fieldName;
 			if (field.primary) {
 				this.primary = fieldName;
-				this.primaryType = field.type;
+				// this.primaryType = field.type;
+				// if (field.length) this.primaryLength = field.length;
 				this.primaryField = field;
-				if (field.length) this.primaryLength = field.length;
 			}
 		}
 	}
