@@ -312,6 +312,19 @@ initApp().then(async () => {
 		await truncateAll();
 	});
 
+	await test("Test getPrimary() and getAttributes()", async () => {
+		// test
+		let primary = Animals.getPrimary();
+		console.log("🚀 ~ awaittest ~ primary:", primary);
+		let attributes = Animals.getAttributes();
+		console.log("🚀 ~ awaittest ~ attributes:", attributes);
+		assert.strictEqual(primary, "id");
+		assert.strictEqual(attributes.id.type, "integer");
+		assert.strictEqual(attributes.name.type, "string");
+		// after
+		await truncateAll();
+	});
+
 	await test("Personal test", async () => {
 		let species = await Species.create({ name: "Dog" }).exec();
 		let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();

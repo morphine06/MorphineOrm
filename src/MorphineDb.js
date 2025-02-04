@@ -1,6 +1,5 @@
 const path = require("path");
 const clc = require("cli-color");
-
 const globule = require("globule");
 const MorphineTable = require("./MorphineTable.js");
 // const { Config } = require("./Config.js");
@@ -127,6 +126,7 @@ const MorphineDb = new (class {
 			let q = `select * from information_schema.KEY_COLUMN_USAGE where TABLE_NAME='${model.def.tableName}' && TABLE_SCHEMA='${this.config.database}'`; //COLUMN_NAME, CONSTRAINT_NAME, REFERENCED_COLUMN_NAME, REFERENCED_TABLE_NAME
 			if (this.config.type == "pg") q = `select * from information_schema.constraint_column_usage where TABLE_NAME='${model.def.tableName}' AND CONSTRAINT_SCHEMA='${this.config.database}'`;
 			let actualConstraints = await this.connection.query(q);
+			console.log("🚀 ~ constraints ~ actualConstraints:", actualConstraints);
 			for (let iLink = 0; iLink < toLink.length; iLink++) {
 				const link = toLink[iLink];
 

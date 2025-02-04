@@ -96,6 +96,9 @@ class MorphineTable {
 		let exec = new MorphineTableExec(this);
 		return exec.query(query, data);
 	}
+	getPrimary() {
+		return this.primary;
+	}
 	getAttributes() {
 		return this.def.attributes;
 	}
