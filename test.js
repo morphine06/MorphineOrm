@@ -1727,6 +1727,151 @@ initApp().then(async () => {
     await truncateAll();
   });
 
+  // Rex (5 ans, sans surnom), Jazz (2, "JJ"), Charly (8, "Chacha"), Felix (1, sans surnom)
+  async function withPets(fn) {
+    await withTempModels(
+      {
+        Pets: `{ attributes: {
+          id: { type: "integer", autoincrement: true, primary: true },
+          name: { type: "string", defaultsTo: "" },
+          nickname: { type: "string", notnull: false },
+          age: { type: "integer", defaultsTo: 0 },
+        } }`,
+      },
+      async () => {
+        const { Pets } = Models;
+        const pets = {};
+        for (const [name, age, nickname] of [
+          ["Rex", 5, null],
+          ["Jazz", 2, "JJ"],
+          ["Charly", 8, "Chacha"],
+          ["Felix", 1, null],
+        ]) {
+          pets[name] = await Pets.create({ name, age, nickname }).exec();
+        }
+        await fn(Pets, pets);
+      },
+    );
+  }
+  const names = (rows) => rows.map((r) => r.name).sort();
+
+  await test("Conditions objet : null, tableaux, undefined", async () => {
+    await withPets(async (Pets, pets) => {
+      assert.deepStrictEqual(names(await Pets.find({ nickname: null }).exec()), ["Felix", "Rex"]);
+      assert.deepStrictEqual(names(await Pets.find({ nickname: { ne: null } }).exec()), [
+        "Charly",
+        "Jazz",
+      ]);
+      assert.deepStrictEqual(names(await Pets.find({ nickname: { isNull: true } }).exec()), [
+        "Felix",
+        "Rex",
+      ]);
+      assert.deepStrictEqual(names(await Pets.find({ nickname: { isNull: false } }).exec()), [
+        "Charly",
+        "Jazz",
+      ]);
+      assert.deepStrictEqual(names(await Pets.find({ id: [pets.Rex.id, pets.Jazz.id] }).exec()), [
+        "Jazz",
+        "Rex",
+      ]);
+      assert.deepStrictEqual(await Pets.find({ id: [] }).exec(), []);
+      assert.deepStrictEqual(names(await Pets.find({ name: { notIn: ["Rex", "Jazz"] } }).exec()), [
+        "Charly",
+        "Felix",
+      ]);
+      assert.strictEqual((await Pets.find({ name: { notIn: [] } }).exec()).length, 4);
+      // undefined (identifiant manquant) ne trouve rien et ne supprime rien
+      assert.deepStrictEqual(await Pets.find({ id: undefined }).exec(), []);
+      assert.strictEqual(await Pets.destroy({ id: undefined }).exec(), 0);
+      // une Date est une valeur, pas un objet d'opérateurs
+      assert.ok(Array.isArray(await Pets.find({ createdAt: new Date() }).exec()));
+    });
+  });
+
+  await test("Conditions objet : opérateurs", async () => {
+    await withPets(async (Pets) => {
+      const q = async (where) => names(await Pets.find(where).exec());
+      assert.deepStrictEqual(await q({ age: { gt: 5 } }), ["Charly"]);
+      assert.deepStrictEqual(await q({ age: { gte: 5 } }), ["Charly", "Rex"]);
+      assert.deepStrictEqual(await q({ age: { lt: 2 } }), ["Felix"]);
+      assert.deepStrictEqual(await q({ age: { lte: 2 } }), ["Felix", "Jazz"]);
+      assert.deepStrictEqual(await q({ age: { gte: 2, lt: 8 } }), ["Jazz", "Rex"]);
+      assert.deepStrictEqual(await q({ age: { between: [2, 5] } }), ["Jazz", "Rex"]);
+      assert.deepStrictEqual(await q({ age: { eq: 8 } }), ["Charly"]);
+      assert.deepStrictEqual(await q({ name: { ne: "Rex" } }), ["Charly", "Felix", "Jazz"]);
+      assert.deepStrictEqual(await q({ name: { in: ["Rex", "Felix"] } }), ["Felix", "Rex"]);
+      assert.deepStrictEqual(await q({ name: { like: "%a%" } }), ["Charly", "Jazz"]);
+      assert.deepStrictEqual(await q({ name: { notLike: "%a%" } }), ["Felix", "Rex"]);
+      assert.deepStrictEqual(await q({ name: { like: "%a%" }, age: { gt: 3 } }), ["Charly"]);
+      // les autres méthodes acceptent les mêmes conditions
+      assert.strictEqual(await Pets.count({ age: { gt: 1 } }).exec(), 3);
+      assert.strictEqual(await Pets.sum("age", { nickname: null }).exec(), 6);
+      assert.strictEqual(
+        await Pets.update({ age: { lt: 3 } }, { nickname: "petit" }).exec(false),
+        2,
+      );
+      assert.strictEqual(await Pets.destroy({ age: { gte: 8 } }).exec(), 1);
+      assert.strictEqual(await Pets.count().exec(), 3);
+    });
+  });
+
+  await test("Conditions objet : $or et $and", async () => {
+    await withPets(async (Pets) => {
+      const q = async (where) => names(await Pets.find(where).exec());
+      assert.deepStrictEqual(await q({ $or: [{ age: { lt: 2 } }, { name: "Charly" }] }), [
+        "Charly",
+        "Felix",
+      ]);
+      assert.deepStrictEqual(
+        await q({ nickname: null, $or: [{ age: { gt: 4 } }, { name: "Jazz" }] }),
+        ["Rex"],
+      );
+      assert.deepStrictEqual(
+        await q({
+          $or: [{ $and: [{ age: { gte: 2 } }, { age: { lte: 5 } }] }, { nickname: "Chacha" }],
+        }),
+        ["Charly", "Jazz", "Rex"],
+      );
+      await assert.rejects(Pets.find({ $or: [] }).exec(), { code: "E_INVALID_WHERE" });
+    });
+  });
+
+  await test("Conditions objet : sur un modèle lié et dans updateone()", async () => {
+    const {
+      animals: [rex, jazz],
+    } = await createDogs("Rex", "Jazz");
+    const labs = await Animals.find({ "breed.name": { like: "Lab%" } })
+      .populate("breed")
+      .exec();
+    assert.strictEqual(labs.length, 2);
+    // updateone() : un tableau d'identifiants peut désigner plusieurs lignes
+    await assert.rejects(Animals.updateone({ id: [rex.id, jazz.id] }, { legs: 3 }).exec(), {
+      code: "E_UPDATEONE_MANY",
+    });
+    assert.strictEqual((await Animals.updateone({ id: [rex.id] }, { legs: 3 }).exec()).legs, 3);
+    assert.strictEqual((await Animals.findone(jazz.id).exec()).legs, 2);
+    // after
+    await truncateAll();
+  });
+
+  await test("Conditions objet : opérateurs invalides", async () => {
+    for (const where of [
+      { legs: { gtt: 2 } },
+      { legs: {} },
+      { legs: { between: [1] } },
+      { legs: { in: 3 } },
+      { $and: "x" },
+      { $or: [[1]] },
+      { "legs; DROP": { gt: 1 } },
+    ]) {
+      await assert.rejects(
+        Animals.find(where).exec(),
+        { code: "E_INVALID_WHERE" },
+        JSON.stringify(where),
+      );
+    }
+  });
+
   await test("Test migrate alter : colonne supprimée puis rétablie", async () => {
     await MorphineDb.query(`ALTER TABLE ${Animals.def.tableName} DROP COLUMN legs`);
     await loadModels();

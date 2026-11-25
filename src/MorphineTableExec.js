@@ -362,22 +362,117 @@ class MorphineTableExec {
       }
     } else {
       where = "1=1";
-      Object.entries(this.where).forEach(([key, val]) => {
-        // La clé est insérée dans le SQL : seulement un nom de colonne, éventuellement
-        // préfixé (Animals.name, breed.name). find(req.query) ne doit rien injecter.
-        if (!SAFE_COLUMN.test(key)) {
-          const err = new Error(
-            `${this.modelname} : nom de colonne invalide dans la condition : ${JSON.stringify(key)}`,
-          );
-          err.code = "E_INVALID_WHERE";
-          throw err;
-        }
-        if (!key.includes(".")) key = `${this.modelname}.${key}`;
-        where += ` AND ${key}=?`;
-        this.whereData.push(val);
-      });
+      const condition = this._objectCondition(this.where);
+      if (condition) where += ` AND ${condition}`;
     }
     return where;
+  }
+
+  _invalidWhere(message) {
+    const err = new Error(`${this.modelname} : ${message}`);
+    err.code = "E_INVALID_WHERE";
+    return err;
+  }
+
+  // Condition objet : chaque clé est une colonne (Animals.name, breed.name), jointe
+  // par AND ; $or / $and prennent un tableau de conditions objet.
+  _objectCondition(obj) {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+      throw this._invalidWhere("une condition doit être un objet { colonne: valeur }");
+    }
+    const parts = [];
+    for (const [key, val] of Object.entries(obj)) {
+      if (key === "$or" || key === "$and") {
+        if (!Array.isArray(val) || !val.length) {
+          throw this._invalidWhere(`${key} attend un tableau non vide de conditions`);
+        }
+        const sub = val.map((o) => `(${this._objectCondition(o) || "1=1"})`);
+        parts.push(`(${sub.join(key === "$or" ? " OR " : " AND ")})`);
+        continue;
+      }
+      // La clé est insérée dans le SQL : seulement un nom de colonne, éventuellement
+      // préfixé (Animals.name, breed.name). find(req.query) ne doit rien injecter.
+      if (!SAFE_COLUMN.test(key)) {
+        throw this._invalidWhere(
+          `nom de colonne invalide dans la condition : ${JSON.stringify(key)}`,
+        );
+      }
+      parts.push(this._columnCondition(key.includes(".") ? key : `${this.modelname}.${key}`, val));
+    }
+    return parts.join(" AND ");
+  }
+
+  // { colonne: valeur } : null → IS NULL, tableau → IN (…), objet d'opérateurs
+  // ({ gt: 2, lte: 5 }), sinon égalité. undefined reste `= NULL`, qui ne trouve
+  // rien : un identifiant manquant ne doit pas devenir « toutes les lignes ».
+  _columnCondition(col, val) {
+    const value = (sql, v) => {
+      this.whereData.push(v);
+      return sql;
+    };
+    const inList = (list, not) => {
+      if (!Array.isArray(list))
+        throw this._invalidWhere(`${col} : ${not ? "notIn" : "in"} attend un tableau`);
+      if (!list.length) return not ? "1=1" : "1=0"; // IN () n'existe pas en SQL
+      this.whereData.push(...list);
+      return `${col} ${not ? "NOT IN" : "IN"} (${list.map(() => "?").join(", ")})`;
+    };
+    if (val === null) return `${col} IS NULL`;
+    if (Array.isArray(val)) return inList(val, false);
+    const isOperators =
+      typeof val === "object" && [Object.prototype, null].includes(Object.getPrototypeOf(val));
+    if (!isOperators) return value(`${col} = ?`, val); // Date, Buffer… : une valeur
+    const parts = [];
+    for (const [op, v] of Object.entries(val)) {
+      switch (op) {
+        case "eq":
+          parts.push(v === null ? `${col} IS NULL` : value(`${col} = ?`, v));
+          break;
+        case "ne":
+          parts.push(v === null ? `${col} IS NOT NULL` : value(`${col} <> ?`, v));
+          break;
+        case "gt":
+          parts.push(value(`${col} > ?`, v));
+          break;
+        case "gte":
+          parts.push(value(`${col} >= ?`, v));
+          break;
+        case "lt":
+          parts.push(value(`${col} < ?`, v));
+          break;
+        case "lte":
+          parts.push(value(`${col} <= ?`, v));
+          break;
+        case "in":
+          parts.push(inList(v, false));
+          break;
+        case "notIn":
+          parts.push(inList(v, true));
+          break;
+        case "like":
+          parts.push(value(`${col} LIKE ?`, v));
+          break;
+        case "notLike":
+          parts.push(value(`${col} NOT LIKE ?`, v));
+          break;
+        case "between":
+          if (!Array.isArray(v) || v.length !== 2) {
+            throw this._invalidWhere(`${col} : between attend [min, max]`);
+          }
+          this.whereData.push(v[0], v[1]);
+          parts.push(`${col} BETWEEN ? AND ?`);
+          break;
+        case "isNull":
+          parts.push(v ? `${col} IS NULL` : `${col} IS NOT NULL`);
+          break;
+        default:
+          throw this._invalidWhere(
+            `${col} : opérateur inconnu "${op}" (eq, ne, gt, gte, lt, lte, in, notIn, like, notLike, between, isNull)`,
+          );
+      }
+    }
+    if (!parts.length) throw this._invalidWhere(`${col} : objet d'opérateurs vide`);
+    return parts.length > 1 ? `(${parts.join(" AND ")})` : parts[0];
   }
 
   _createSelect() {
@@ -569,7 +664,9 @@ class MorphineTableExec {
       (w &&
         typeof w === "object" &&
         Object.keys(w).length === 1 &&
-        [this.primary, `${this.modelname}.${this.primary}`].includes(Object.keys(w)[0]));
+        [this.primary, `${this.modelname}.${this.primary}`].includes(Object.keys(w)[0]) &&
+        // une seule valeur : { id: [1, 2] } ou { id: { gt: 1 } } peuvent en désigner plusieurs
+        ["number", "string"].includes(typeof Object.values(w)[0]));
     if (onPrimary) return;
     const { sql, data } = this._updateWhere;
     const rows = await this.connection.query(

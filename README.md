@@ -275,6 +275,31 @@ await Dogs.find({ kindId: 1, name: "Rex" }).exec();
 await Dogs.find("kindId=? AND (name LIKE ? OR name LIKE ?)", [1, "Jazz", "%e%"]).exec();
 ```
 
+In an object condition:
+
+```js
+await Dogs.find({ nickname: null }).exec(); // nickname IS NULL
+await Dogs.find({ id: [1, 2, 3] }).exec(); // id IN (1, 2, 3) ; [] matches nothing
+await Dogs.find({ legs: { gte: 2, lt: 6 } }).exec(); // legs >= 2 AND legs < 6
+await Dogs.find({ name: { like: "R%" }, kindId: { ne: null } }).exec();
+await Dogs.find({ $or: [{ legs: { lt: 2 } }, { name: "Rex" }] }).exec();
+await Dogs.find({ "kind.name": { in: ["Labrador", "Poodle"] } })
+  .populate("kind")
+  .exec();
+```
+
+| Operator          | SQL                                               |
+| ----------------- | ------------------------------------------------- |
+| `eq`, `ne`        | `=`, `<>` (`IS NULL`, `IS NOT NULL` with `null`)  |
+| `gt`, `gte`       | `>`, `>=`                                         |
+| `lt`, `lte`       | `<`, `<=`                                         |
+| `in`, `notIn`     | `IN (…)`, `NOT IN (…)`                            |
+| `like`, `notLike` | `LIKE`, `NOT LIKE` (case-sensitive on PostgreSQL) |
+| `between`         | `BETWEEN min AND max`, with `[min, max]`          |
+| `isNull`          | `IS NULL` (`true`) or `IS NOT NULL` (`false`)     |
+
+Several operators on a column, and several columns, are joined with `AND`; `$or` and `$and` take an array of object conditions, and can be nested. An unknown operator throws an `E_INVALID_WHERE` error. `undefined` matches nothing (`= NULL`): a missing id never becomes "every row". As in SQL, `ne` does not match the rows where the column is `NULL`.
+
 In a SQL condition, columns can be prefixed with the model name (`Dogs.name`) or with the alias path of a populated association (`kind.name`, `kind.family.name`).
 
 `update`, `updateone` and `destroy` refuse to run without a condition: an empty condition would touch every row. Use `truncate()` or `drop()` to empty a table on purpose.
