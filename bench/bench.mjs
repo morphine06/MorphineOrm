@@ -390,18 +390,20 @@ const fmt = (us) =>
         : us.toFixed(0) + " µs";
 process.stderr.write("\n");
 console.log(`\nServeur ${version}, Node ${process.version}, ${N} itérations par cas\n`);
-console.log("| Cas | MorphineOrm | Drizzle | Prisma | Plus rapide |");
-console.log("|---|---|---|---|---|");
+// Drizzle et Prisma : temps, et rapport au temps de MorphineOrm
+// (×1.6 = 1,6 fois plus lent ; ×0.8 = plus rapide)
+const vs = (r, orm) =>
+  typeof r[orm] === "number" && typeof r.morphine === "number"
+    ? `${fmt(r[orm])} (×${(r[orm] / r.morphine).toFixed(1)})`
+    : fmt(r[orm]);
+console.log("| Cas | MorphineOrm | Drizzle | Prisma |");
+console.log("|---|---|---|---|");
 for (const r of results) {
-  const times = ["morphine", "drizzle", "prisma"].filter((o) => typeof r[o] === "number");
-  const best = times.sort((a, b) => r[a] - r[b])[0];
-  const names = { morphine: "MorphineOrm", drizzle: "Drizzle", prisma: "Prisma" };
-  const second = times[1];
-  const lead = best && second ? ` (×${(r[second] / r[best]).toFixed(2)})` : "";
-  console.log(
-    `| ${r.label} | ${fmt(r.morphine)} | ${fmt(r.drizzle)} | ${fmt(r.prisma)} | ${best ? names[best] + lead : "—"} |`,
-  );
+  console.log(`| ${r.label} | ${fmt(r.morphine)} | ${vs(r, "drizzle")} | ${vs(r, "prisma")} |`);
 }
+console.log(
+  "\n×N : temps divisé par celui de MorphineOrm (×1.6 = 1,6 fois plus lent, ×0.8 = plus rapide)",
+);
 for (const r of results) {
   for (const [orm, msg] of Object.entries(r.errors || {})) {
     console.log(`\n${r.label} — ${orm} : ${msg.slice(0, 160)}`);

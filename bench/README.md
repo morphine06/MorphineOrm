@@ -21,22 +21,24 @@ It uses the test database of `../.env.local` and **empties the tables `Species2`
 
 MariaDB 11.6.2 on the same machine, Node 22.22, MorphineOrm 2, Drizzle 0.45.4, Prisma 7.10.1, 2,000 iterations per case.
 
-| Case                                            | MorphineOrm | Drizzle  | Prisma    | Fastest                  |
-| ----------------------------------------------- | ----------- | -------- | --------- | ------------------------ |
-| findone by id                                   | 91 µs       | 149 µs   | 205 µs    | MorphineOrm (×1.64)      |
-| findone by id (Drizzle `prepare()`)             | 89 µs       | 90 µs    | —         | tie                      |
-| findone by id, 50 in parallel                   | 36 µs       | 114 µs   | 36 µs     | tie MorphineOrm / Prisma |
-| filtered, sorted, paginated list (20 rows)      | 313 µs      | 358 µs   | 440 µs    | MorphineOrm (×1.14)      |
-| list + 2 associated models (20 rows)            | 789 µs      | 1.89 ms  | 865 µs    | MorphineOrm (×1.10)      |
-| list + 2 associated models (Drizzle relational) | —           | error    | —         | —                        |
-| filtered count                                  | 1.35 ms     | 1.23 ms  | 1.26 ms   | tie                      |
-| a breed and its ~50 animals                     | 260 µs      | 380 µs   | 661 µs    | MorphineOrm (×1.46)      |
-| insert 1 row, complete row returned             | 305 µs      | 353 µs   | 576 µs    | MorphineOrm (×1.16)      |
-| insert 1 row, id only                           | 180 µs      | 187 µs   | 492 µs    | tie                      |
-| update by id, complete row returned             | 276 µs      | 331 µs   | 653 µs    | MorphineOrm (×1.20)      |
-| update by id, number of rows only               | 166 µs      | 181 µs   | 221 µs    | MorphineOrm (×1.09)      |
-| insert 1,000 rows                               | 26.39 ms    | 21.18 ms | 114.70 ms | Drizzle (×1.25)          |
-| delete by id                                    | 170 µs      | 178 µs   | 552 µs    | tie                      |
+| Case                                            | MorphineOrm | Drizzle         | Prisma           |
+| ----------------------------------------------- | ----------- | --------------- | ---------------- |
+| findone by id                                   | 91 µs       | 149 µs (×1.6)   | 205 µs (×2.3)    |
+| findone by id (Drizzle `prepare()`)             | 89 µs       | 90 µs (×1.0)    | —                |
+| findone by id, 50 in parallel                   | 36 µs       | 114 µs (×3.2)   | 36 µs (×1.0)     |
+| filtered, sorted, paginated list (20 rows)      | 313 µs      | 358 µs (×1.1)   | 440 µs (×1.4)    |
+| list + 2 associated models (20 rows)            | 789 µs      | 1.89 ms (×2.4)  | 865 µs (×1.1)    |
+| list + 2 associated models (Drizzle relational) | —           | error           | —                |
+| filtered count                                  | 1.35 ms     | 1.23 ms (×0.9)  | 1.26 ms (×0.9)   |
+| a breed and its ~50 animals                     | 260 µs      | 380 µs (×1.5)   | 661 µs (×2.5)    |
+| insert 1 row, complete row returned             | 305 µs      | 353 µs (×1.2)   | 576 µs (×1.9)    |
+| insert 1 row, id only                           | 180 µs      | 187 µs (×1.0)   | 492 µs (×2.7)    |
+| update by id, complete row returned             | 276 µs      | 331 µs (×1.2)   | 653 µs (×2.4)    |
+| update by id, number of rows only               | 166 µs      | 181 µs (×1.1)   | 221 µs (×1.3)    |
+| insert 1,000 rows                               | 26.39 ms    | 21.18 ms (×0.8) | 114.70 ms (×4.3) |
+| delete by id                                    | 170 µs      | 178 µs (×1.0)   | 552 µs (×3.2)    |
+
+×N: the time divided by MorphineOrm's (×1.6 = 1.6 times slower, ×0.8 = faster).
 
 ## Reading the results
 
