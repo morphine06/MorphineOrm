@@ -36,6 +36,13 @@ module.exports = function mymodel() {
         type: "integer",
         defaultsTo: 2,
       },
+      vaccinated: {
+        type: "boolean",
+        defaultsTo: false,
+      },
+      infos: {
+        type: "json",
+      },
       breedId: {
         model: "Breeds",
         alias: "breed",

@@ -25,6 +25,11 @@ const NUMERIC_TYPES = new Set([
  * PostgreSQL, lui, refuserait.
  */
 function defaultValueFor(field) {
+  // Un booléen s'écrit 0 / 1 : PostgreSQL refuse `false` dans sa colonne SMALLINT.
+  if (field.type === "boolean") {
+    const v = field.defaultsTo;
+    return v === true || v === "true" || v === 1 || v === "1" ? 1 : 0;
+  }
   return field.defaultsTo ?? (NUMERIC_TYPES.has(field.type) || field.model ? 0 : "");
 }
 
@@ -89,6 +94,8 @@ class MorphineTableExec {
     return this;
   }
   cloneDeep(what) {
+    // undefined (update() sans condition) ne survit pas à JSON.stringify
+    if (what === undefined) return undefined;
     return JSON.parse(JSON.stringify(what));
   }
   update(where, whereData, data) {
@@ -728,7 +735,7 @@ class MorphineTableExec {
 
   async exec(returnCompleteRow = this.returnCompleteRow) {
     if (this.command == "REPLACE") {
-      let w = "0",
+      let w = "1=0", // PostgreSQL refuse `WHERE 0`
         wData = [];
       if (this.data[this.primary]) {
         w = this.primary + "=?";
@@ -818,7 +825,8 @@ class MorphineTableExec {
           res = null;
           break;
         default:
-          res = [];
+          // findone() et count() rendent null, find() un tableau vide
+          res = this.onlyOne || this.iscount ? null : [];
           break;
       }
       return res;

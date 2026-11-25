@@ -425,6 +425,240 @@ initApp().then(async () => {
     await truncateAll();
   });
 
+  // Une espèce, une race et, si demandé, des animaux de cette race.
+  async function createDogs(...names) {
+    const species = await Species.create({ name: "Dog" }).exec();
+    const breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+    const animals = [];
+    for (const name of names)
+      animals.push(await Animals.create({ name, breedId: breed.id }).exec());
+    return { species, breed, animals };
+  }
+
+  await test("Sécurité : update() et destroy() sans condition sont refusés", async () => {
+    const {
+      animals: [rex],
+    } = await createDogs("Rex");
+    for (const where of [undefined, "", {}]) {
+      await assert.rejects(Animals.destroy(where).exec(), /sans condition/);
+      await assert.rejects(Animals.update(where, { legs: 9 }).exec(), /sans condition/);
+    }
+    await assert.rejects(Animals.updateone({}, { legs: 9 }).exec(), /sans condition/);
+    assert.strictEqual(await Animals.count().exec(), 1);
+    assert.strictEqual((await Animals.findone(rex.id).exec()).legs, 2);
+    // after
+    await truncateAll();
+  });
+
+  await test("Sécurité : l'identifiant 0 ne désigne aucune ligne", async () => {
+    const {
+      animals: [rex],
+    } = await createDogs("Rex");
+    assert.strictEqual(await Animals.findone(0).exec(), null);
+    assert.strictEqual(await Animals.updateone(0, { legs: 9 }).exec(false), 0);
+    assert.strictEqual(await Animals.destroy(0).exec(), 0);
+    assert.strictEqual((await Animals.findone(rex.id).exec()).legs, 2);
+    // after
+    await truncateAll();
+  });
+
+  await test("Conditions : objet, identifiant en chaîne, update() à trois arguments, orderBy()", async () => {
+    const { breed } = await createDogs();
+    const rex = await Animals.create({ name: "Rex", breedId: breed.id, legs: 4 }).exec();
+    await Animals.create({ name: "Jazz", breedId: breed.id, legs: 4 }).exec();
+    await Animals.create({ name: "Charly", breedId: breed.id, legs: 3 }).exec();
+    assert.strictEqual((await Animals.find({ legs: 4 }).exec()).length, 2);
+    assert.strictEqual((await Animals.find({ legs: 4, name: "Rex" }).exec()).length, 1);
+    assert.strictEqual((await Animals.findone(String(rex.id)).exec()).name, "Rex");
+    const updated = await Animals.update("Animals.legs=?", [4], { birth: "2020-01-01" }).exec();
+    assert.strictEqual(updated.length, 2);
+    assert.ok(updated.every((a) => a.birth === "2020-01-01"));
+    const sorted = await Animals.find().orderBy("Animals.name").exec();
+    assert.deepStrictEqual(
+      sorted.map((a) => a.name),
+      ["Charly", "Jazz", "Rex"],
+    );
+    const desc = await Animals.find().orderBy("Animals.name DESC").exec();
+    assert.strictEqual(desc[0].name, "Rex");
+    // after
+    await truncateAll();
+  });
+
+  await test("Valeurs : apostrophes, guillemets et SQL passent sans risque", async () => {
+    const { breed } = await createDogs();
+    const name = `O'Reilly "le" chien'); DROP TABLE ${Animals.def.tableName}; --`;
+    const created = await Animals.create({ name, breedId: breed.id }).exec();
+    assert.strictEqual(created.name, name);
+    assert.strictEqual((await Animals.find({ name }).exec()).length, 1);
+    assert.strictEqual((await Animals.find("Animals.name=?", [name]).exec()).length, 1);
+    assert.strictEqual(await Animals.count().exec(), 1);
+    // after
+    await truncateAll();
+  });
+
+  await test("Un champ présent à null prend sa valeur par défaut", async () => {
+    const { breed } = await createDogs();
+    const rex = await Animals.create({ name: "Rex", breedId: breed.id, legs: null }).exec();
+    assert.strictEqual(rex.legs, 2);
+    await Animals.updateone(rex.id, { legs: 4 }).exec();
+    const back = await Animals.updateone(rex.id, { legs: null }).exec();
+    assert.strictEqual(back.legs, 2);
+    // after
+    await truncateAll();
+  });
+
+  await test("Dates : vides, invalides, createdAt et updatedAt", async () => {
+    const { breed } = await createDogs();
+    const empty = DB_TYPE === "pg" ? null : "0000-00-00";
+    for (const birth of ["", null, "pas une date"]) {
+      const a = await Animals.create({ name: "Rex", breedId: breed.id, birth }).exec();
+      assert.strictEqual(a.birth, empty);
+      assert.strictEqual(a.age, null);
+    }
+    const jazz = await Animals.create({
+      name: "Jazz",
+      breedId: breed.id,
+      birth: "2021-05-04T10:00:00",
+    }).exec();
+    assert.strictEqual(jazz.birth, "2021-05-04");
+    const datetime = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+    assert.match(jazz.createdAt, datetime);
+    assert.match(jazz.updatedAt, datetime);
+    const forced = await Animals.updateone(jazz.id, {
+      legs: 3,
+      updatedAtForced: "2020-01-01 00:00:00",
+    }).exec();
+    assert.strictEqual(forced.updatedAt, "2020-01-01 00:00:00");
+    assert.strictEqual(forced.createdAt, jazz.createdAt);
+    // after
+    await truncateAll();
+  });
+
+  await test("Types json et boolean", async () => {
+    const { breed } = await createDogs();
+    const infos = { color: "black", tags: ["calme", "joueur"], weight: 32.5 };
+    const rex = await Animals.create({
+      name: "Rex",
+      breedId: breed.id,
+      vaccinated: true,
+      infos,
+    }).exec();
+    assert.strictEqual(rex.vaccinated, true);
+    assert.deepStrictEqual(rex.infos, infos);
+    const jazz = await Animals.create({ name: "Jazz", breedId: breed.id }).exec();
+    assert.strictEqual(jazz.vaccinated, false);
+    assert.strictEqual(jazz.infos, null);
+    const back = await Animals.updateone(rex.id, {
+      vaccinated: false,
+      infos: { color: "white" },
+    }).exec();
+    assert.strictEqual(back.vaccinated, false);
+    assert.deepStrictEqual(back.infos, { color: "white" });
+    // les valeurs du modèle lié sont converties aussi
+    const breedWithAnimals = await Breeds.findone(breed.id)
+      .onetomany("Animals", "breed", "animals")
+      .orderBy("Animals.name")
+      .exec();
+    assert.strictEqual(breedWithAnimals.animals.length, 2);
+    // after
+    await truncateAll();
+  });
+
+  await test("createEmpty()", async () => {
+    const empty = Animals.createEmpty();
+    assert.strictEqual(empty.id, 0);
+    assert.strictEqual(empty.name, "");
+    assert.strictEqual(empty.legs, 2);
+    assert.strictEqual(empty.breedId, 0);
+    assert.strictEqual(empty.vaccinated, false);
+    assert.strictEqual(empty.createdAt, null);
+    const withJoined = Animals.createEmpty({ createJoined: true });
+    assert.strictEqual(withJoined.breed.name, "");
+    assert.strictEqual(withJoined.breedId, undefined);
+  });
+
+  await test("replace() crée puis met à jour", async () => {
+    const { breed } = await createDogs();
+    const rex = await Animals.replace({ name: "Rex", breedId: breed.id }).exec();
+    assert.strictEqual(rex.name, "Rex");
+    const rex2 = await Animals.replace({ id: rex.id, name: "Rex 2" }).exec();
+    assert.strictEqual(rex2.id, rex.id);
+    assert.strictEqual(rex2.name, "Rex 2");
+    assert.strictEqual(await Animals.count().exec(), 1);
+    // after
+    await truncateAll();
+  });
+
+  await test("Condition sur un modèle lié à deux niveaux", async () => {
+    await createDogs("Rex", "Jazz");
+    const cat = await Species.create({ name: "Cat" }).exec();
+    const siamese = await Breeds.create({ name: "Siamese", speciesId: cat.id }).exec();
+    await Animals.create({ name: "Felix", breedId: siamese.id }).exec();
+    const dogs = await Animals.find("breed.species.name=?", ["Dog"])
+      .populate("breed")
+      .populate("breed.species")
+      .orderBy("Animals.name")
+      .exec();
+    assert.deepStrictEqual(
+      dogs.map((d) => d.name),
+      ["Jazz", "Rex"],
+    );
+    assert.strictEqual(dogs[0].breed.species.name, "Dog");
+    assert.strictEqual(await Animals.count().exec(), 3);
+    // after
+    await truncateAll();
+  });
+
+  await test("Hooks beforeDestroy() et beforeTruncate()", async () => {
+    const calls = [];
+    // Animals : TRUNCATE est refusé sur une table référencée par une clé étrangère
+    Animals.def.beforeDestroy = async (where, whereData) => calls.push(["destroy", where]);
+    Animals.def.beforeTruncate = async () => calls.push(["truncate"]);
+    try {
+      const {
+        animals: [rex],
+      } = await createDogs("Rex", "Jazz");
+      await Animals.destroy(rex.id).exec();
+      await Animals.truncate().exec();
+      assert.deepStrictEqual(calls, [["destroy", rex.id], ["truncate"]]);
+      assert.strictEqual(await Animals.count().exec(), 0);
+    } finally {
+      delete Animals.def.beforeDestroy;
+      delete Animals.def.beforeTruncate;
+    }
+    // after
+    await truncateAll();
+  });
+
+  await test(
+    "Clé étrangère RESTRICT : une race utilisée ne se supprime pas",
+    { skip: DB_TYPE === "sqlite3" && "SQLite : pas de contrainte ajoutée après coup" },
+    async () => {
+      const { breed } = await createDogs("Rex");
+      await assert.rejects(Breeds.destroy(breed.id).exec());
+      assert.strictEqual((await Breeds.findone(breed.id).exec()).name, "Labrador");
+      // after
+      await truncateAll();
+    },
+  );
+
+  await test("catchError: false : l'erreur est journalisée, la requête renvoie vide", async () => {
+    const warn = console.warn;
+    const logged = [];
+    console.warn = (...args) => logged.push(args);
+    MorphineDb.connection.catchError = false;
+    try {
+      assert.deepStrictEqual(await Animals.query("SELECT * FROM table_inexistante").exec(), []);
+      assert.deepStrictEqual(await Animals.find("colonne_inexistante=1").exec(), []);
+      assert.strictEqual(await Animals.findone("colonne_inexistante=1").exec(), null);
+      assert.strictEqual(await Animals.count("colonne_inexistante=1").exec(), null);
+      assert.ok(logged.length >= 4);
+    } finally {
+      MorphineDb.connection.catchError = true;
+      console.warn = warn;
+    }
+  });
+
   await test("Test migrate alter : colonne supprimée puis rétablie", async () => {
     await MorphineDb.query(`ALTER TABLE ${Animals.def.tableName} DROP COLUMN legs`);
     await loadModels();
