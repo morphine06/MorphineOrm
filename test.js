@@ -999,6 +999,204 @@ initApp().then(async () => {
     },
   );
 
+  // Écrit des modèles temporaires, les charge, exécute fn, puis supprime leurs tables.
+  async function withTempModels(files, fn) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "morphine-models-"));
+    for (const [name, def] of Object.entries(files)) {
+      fs.writeFileSync(path.join(dir, `${name}.model.js`), `module.exports = () => (${def});`);
+    }
+    try {
+      await loadModels(dir);
+      await fn();
+    } finally {
+      for (const name of Object.keys(files).reverse()) {
+        if (!Models[name]) continue;
+        try {
+          await Models[name].drop().exec();
+        } catch {
+          /* table jamais créée */
+        } finally {
+          delete Models[name];
+        }
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  await test("Unicode et emoji", async () => {
+    const { breed } = await createDogs();
+    const name = "Rex 🐶 Ça été naïve — 日本語 🇫🇷";
+    const infos = { note: "très 👍", tags: ["café", "ß", "😀"] };
+    const rex = await Animals.create({ name, breedId: breed.id, infos }).exec();
+    assert.strictEqual(rex.name, name);
+    assert.deepStrictEqual(rex.infos, infos);
+    assert.strictEqual((await Animals.find({ name }).exec()).length, 1);
+    // after
+    await truncateAll();
+  });
+
+  await test("Longueur maximale d'un texte", async () => {
+    const { breed } = await createDogs();
+    const max = "é".repeat(255); // 255 caractères multi-octets
+    const rex = await Animals.create({ name: max, breedId: breed.id }).exec();
+    assert.strictEqual(rex.name, max);
+    await assert.rejects(Animals.create({ name: max + "e", breedId: breed.id }).exec(), {
+      code: "E_VALIDATION",
+    });
+    // after
+    await truncateAll();
+  });
+
+  await test("Nombres : zéro, négatif, grand entier", async () => {
+    const { breed } = await createDogs();
+    for (const legs of [0, -3, 2147483647]) {
+      const a = await Animals.create({ name: "Rex", breedId: breed.id, legs }).exec();
+      assert.strictEqual(a.legs, legs); // 0 est falsy : il ne doit pas devenir la valeur par défaut
+      assert.strictEqual((await Animals.updateone(a.id, { legs }).exec()).legs, legs);
+    }
+    // after
+    await truncateAll();
+  });
+
+  await test("Dates : objets Date et dayjs, createdAtForced, ignoreUpdatedAt", async () => {
+    const { breed } = await createDogs();
+    const dayjs = require("dayjs");
+    const rex = await Animals.create({
+      name: "Rex",
+      breedId: breed.id,
+      birth: new Date(2021, 2, 4, 12, 0, 0),
+      createdAtForced: "2020-02-02 10:00:00",
+    }).exec();
+    assert.strictEqual(rex.birth, "2021-03-04");
+    assert.strictEqual(rex.createdAt, "2020-02-02 10:00:00");
+    const jazz = await Animals.create({
+      name: "Jazz",
+      breedId: breed.id,
+      birth: dayjs("2019-07-14"),
+    }).exec();
+    assert.strictEqual(jazz.birth, "2019-07-14");
+    await Animals.updateone(rex.id, { updatedAtForced: "2020-03-03 10:00:00" }).exec();
+    const kept = await Animals.updateone(rex.id, { legs: 3, ignoreUpdatedAt: true }).exec();
+    assert.strictEqual(kept.legs, 3);
+    assert.strictEqual(kept.updatedAt, "2020-03-03 10:00:00");
+    // after
+    await truncateAll();
+  });
+
+  await test("Un virtual qui lève une erreur vaut null", async () => {
+    const { breed } = await createDogs();
+    Animals.def.virtuals.broken = function () {
+      throw new Error("boum");
+    };
+    try {
+      let rex;
+      const logs = await captureWarnings(async () => {
+        rex = await Animals.create({ name: "Rex", breedId: breed.id, birth: "2020-01-01" }).exec();
+      });
+      assert.strictEqual(rex.broken, null);
+      assert.strictEqual(typeof rex.age, "number"); // les autres virtuals sont calculés
+      assert.match(logs, /error in virtuals/);
+    } finally {
+      delete Animals.def.virtuals.broken;
+    }
+    // after
+    await truncateAll();
+  });
+
+  await test("populate() d'un alias inconnu est ignoré", async () => {
+    await createDogs("Rex");
+    const rows = await Animals.find().populate("inconnu").populate("breed.inconnu").exec();
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].breed.name, "Labrador");
+    // after
+    await truncateAll();
+  });
+
+  await test("MorphineDb.query() : écriture et paramètres", async () => {
+    await Species.create({ name: "A" }).exec();
+    await Species.create({ name: "A" }).exec();
+    const res = await MorphineDb.query(`UPDATE ${Species.def.tableName} SET name=? WHERE name=?`, [
+      "B",
+      "A",
+    ]);
+    assert.strictEqual(res.affectedRows, 2);
+    const rows = await MorphineDb.query(`SELECT name FROM ${Species.def.tableName} WHERE name=?`, [
+      "B",
+    ]);
+    assert.strictEqual(rows.length, 2);
+    // after
+    await truncateAll();
+  });
+
+  await test("Modèles : auto-référence et deux clés vers le même modèle", async () => {
+    await withTempModels(
+      {
+        Teams: `{ attributes: { id: { type: "integer", autoincrement: true, primary: true }, name: { type: "string", defaultsTo: "" } } }`,
+        Matches: `{ attributes: {
+          id: { type: "integer", autoincrement: true, primary: true },
+          homeId: { model: "Teams", alias: "home", onDelete: "RESTRICT", onUpdate: "RESTRICT" },
+          awayId: { model: "Teams", alias: "away", onDelete: "RESTRICT", onUpdate: "RESTRICT" },
+        } }`,
+        Categories: `{ attributes: {
+          id: { type: "integer", autoincrement: true, primary: true },
+          name: { type: "string", defaultsTo: "" },
+          parentId: { model: "Categories", alias: "parent" },
+        } }`,
+      },
+      async () => {
+        const { Teams, Matches, Categories } = Models;
+        const lyon = await Teams.create({ name: "Lyon" }).exec();
+        const nice = await Teams.create({ name: "Nice" }).exec();
+        const m = await Matches.create({ homeId: lyon.id, awayId: nice.id })
+          .populate("home")
+          .populate("away")
+          .exec();
+        assert.strictEqual(m.home.name, "Lyon");
+        assert.strictEqual(m.away.name, "Nice");
+        const away = await Matches.find("away.name=?", ["Nice"]).populateAll().exec();
+        assert.strictEqual(away.length, 1);
+        assert.strictEqual(
+          (await Matches.find("home.name=?", ["Nice"]).populateAll().exec()).length,
+          0,
+        );
+
+        const root = await Categories.create({ name: "Animaux" }).exec();
+        const dogs = await Categories.create({ name: "Chiens", parentId: root.id }).exec();
+        await Categories.create({ name: "Chats", parentId: root.id }).exec();
+        const child = await Categories.findone(dogs.id).populate("parent").exec();
+        assert.strictEqual(child.parent.name, "Animaux");
+        assert.strictEqual(
+          (await Categories.findone(root.id).populate("parent").exec()).parent,
+          null,
+        );
+        const withChildren = await Categories.findone(root.id)
+          .onetomany("Categories", "parent", "children")
+          .exec();
+        assert.deepStrictEqual(withChildren.children.map((c) => c.name).sort(), [
+          "Chats",
+          "Chiens",
+        ]);
+      },
+    );
+  });
+
+  await test("Modèle lié à un modèle inexistant, dossier de modèles absent", async () => {
+    const before = Object.keys(Models).length;
+    await loadModels(path.join(os.tmpdir(), "dossier-qui-n-existe-pas"));
+    assert.strictEqual(Object.keys(Models).length, before);
+    const logs = await captureWarnings(() =>
+      withTempModels(
+        {
+          Ghosts: `{ attributes: { id: { type: "integer", autoincrement: true, primary: true }, ownerId: { model: "Inexistant", alias: "owner" } } }`,
+        },
+        async () => {
+          assert.ok(Models.Ghosts);
+        },
+      ),
+    );
+    assert.match(logs, /Ghosts\.ownerId : modèle Inexistant introuvable/);
+  });
+
   await test("Test migrate alter : colonne supprimée puis rétablie", async () => {
     await MorphineDb.query(`ALTER TABLE ${Animals.def.tableName} DROP COLUMN legs`);
     await loadModels();
@@ -1051,7 +1249,11 @@ initApp().then(async () => {
     assert.strictEqual(bird.id, 1);
   });
 
-  await MorphineDb.close();
+  await test("close() : une requête ensuite échoue clairement, un second close() est sans effet", async () => {
+    await MorphineDb.close();
+    await assert.rejects(Species.find().exec(), /connexion/);
+    await MorphineDb.close();
+  });
 
   // Il faudrait pouvoir faire ça !!!
   // Enfin... je ne sais pas... c'est peut-être pas nécessaire...

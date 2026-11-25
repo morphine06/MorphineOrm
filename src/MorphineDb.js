@@ -348,6 +348,12 @@ const MorphineDb = new (class {
     this._logMigration(q);
     await this.connection.query(q, [], true);
   }
+  // Clé étrangère vers un modèle qui n'a pas été chargé : la synchronisation
+  // l'ignore (loadModels() l'a signalé) au lieu d'interrompre le démarrage.
+  _isUnresolvedLink(field) {
+    return Boolean(field.model && !this.models[field.model]);
+  }
+
   async updateTable(def) {
     if (this.config.type == "pg") return this._updateTablePg(def);
     let describe;
@@ -356,6 +362,7 @@ const MorphineDb = new (class {
     else describe = await this.connection.query(`DESCRIBE ${def.tableName}`);
 
     for (const [fieldName, field] of Object.entries(def.attributes)) {
+      if (this._isUnresolvedLink(field)) continue;
       let type1 = null;
       if (field.model) {
         let f = this._getJoinedModel(field);
@@ -664,6 +671,7 @@ const MorphineDb = new (class {
       );
     else rows2 = await this.connection.query(`SHOW INDEX FROM ${def.tableName}`);
     for (const [fieldName, field] of Object.entries(def.attributes)) {
+      if (this._isUnresolvedLink(field)) continue;
       let createIndex = false;
       //let createUnique = false;
       if (field.model || field.index) {
@@ -992,7 +1000,15 @@ async function loadModels(dir, silently = false) {
     for (const field of Object.values(model.def.attributes)) {
       if (!field.model || field.type) continue;
       const target = MorphineDb.models[field.model];
-      if (!target || !target.primaryField) continue;
+      if (!target) {
+        console.warn(
+          clc.red(
+            `@Warning - ${model.modelname}.${field.fieldName} : modèle ${field.model} introuvable, colonne ignorée par la synchronisation`,
+          ),
+        );
+        continue;
+      }
+      if (!target.primaryField) continue;
       field.type = target.primaryField.type;
       field.length = target.primaryField.length || 11;
     }

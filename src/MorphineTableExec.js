@@ -792,6 +792,11 @@ class MorphineTableExec {
   }
 
   async exec(returnCompleteRow = this.returnCompleteRow) {
+    if (!this.connection) {
+      throw new Error(
+        `${this.modelname} : pas de connexion, MorphineDb.init() n'a pas été appelé ou close() l'a fermée`,
+      );
+    }
     if (this.command == "REPLACE") {
       let w = "1=0", // PostgreSQL refuse `WHERE 0`
         wData = [];
