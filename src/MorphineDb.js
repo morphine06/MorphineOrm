@@ -22,17 +22,24 @@ const MorphineDb = new (class {
         db: db,
         catchError: this.config.catchError,
         query: async function (sql, sqlData = []) {
+          // Une lecture rend ses lignes (all) ; une écriture rend, comme mysql2,
+          // { affectedRows, insertId } (run), que all() ne fournit pas.
+          const isRead = /^\s*(SELECT|PRAGMA|WITH)\b/i.test(sql);
           return new Promise((resolve, reject) => {
-            this.db.all(sql, sqlData, (err, rows) => {
-              // console.log("🚀 ~ file: MorphineDb.js:61 ~ rows:", sql, sqlData, rows)
+            const done = (err, result) => {
               if (err) {
                 if (this.catchError) reject(err);
                 else {
                   console.warn(clc.red("sql-error"), err, sql, sqlData);
                   resolve(null);
                 }
-              } else resolve(rows);
-            });
+              } else resolve(result);
+            };
+            if (isRead) this.db.all(sql, sqlData, (err, rows) => done(err, rows));
+            else
+              this.db.run(sql, sqlData, function (err) {
+                done(err, err ? null : { affectedRows: this.changes, insertId: this.lastID });
+              });
           });
         },
       };
@@ -67,6 +74,8 @@ const MorphineDb = new (class {
           }
           try {
             let results = await this.client.query(sql, sqlData);
+            // Comme mysql2 : le nombre de lignes touchées par une écriture.
+            results.rows.affectedRows = results.rowCount;
             return results.rows;
           } catch (error) {
             if (this.catchError) throw error;
@@ -148,7 +157,8 @@ const MorphineDb = new (class {
     if (!c) return;
     if (c.pool) await c.pool.end();
     else if (c.client) await c.client.end();
-    else if (c.db) await new Promise((resolve, reject) => c.db.close((e) => (e ? reject(e) : resolve())));
+    else if (c.db)
+      await new Promise((resolve, reject) => c.db.close((e) => (e ? reject(e) : resolve())));
     this.connection = null;
     this._referentialConstraints = null;
   }
@@ -308,6 +318,7 @@ const MorphineDb = new (class {
     await this.connection.query(q, [], true);
   }
   async updateTable(def) {
+    if (this.config.type == "pg") return this._updateTablePg(def);
     let describe;
     if (this.config.type == "sqlite3")
       describe = await this.connection.query(`PRAGMA table_info(${def.tableName})`);
@@ -430,6 +441,189 @@ const MorphineDb = new (class {
       }
     }
   }
+  // Type PostgreSQL d'un attribut, sous la forme que rend _pgColumnType().
+  _pgType(field) {
+    const t = field.type.toLowerCase();
+    const len = field.length;
+    switch (t) {
+      case "int":
+      case "integer":
+      case "mediumint":
+      case "year":
+        return "INTEGER";
+      case "tinyint":
+      case "smallint":
+      case "boolean": // écrit en 0 / 1, comme le TINYINT de MySQL
+      case "bit":
+        return "SMALLINT";
+      case "bigint":
+        return "BIGINT";
+      case "float":
+        return "REAL";
+      case "double":
+        return "DOUBLE PRECISION";
+      case "decimal":
+      case "price":
+        return `NUMERIC(${String(len || "10,2").replace(/\s/g, "")})`;
+      case "char":
+        return `CHAR(${len || 1})`;
+      case "varchar":
+      case "string":
+        return `VARCHAR(${len || 255})`;
+      case "date":
+        return "DATE";
+      case "datetime":
+        return "TIMESTAMP";
+      case "time":
+        return "TIME";
+      case "tinyblob":
+      case "mediumblob":
+      case "longblob":
+      case "blob":
+      case "binary":
+      case "varbinary":
+        return "BYTEA";
+      default: // text, tinytext, mediumtext, longtext, json, enum, set
+        return "TEXT";
+    }
+  }
+
+  // Type d'une colonne existante, d'après information_schema.columns.
+  _pgColumnType(col) {
+    switch (col.data_type) {
+      case "character varying":
+        return `VARCHAR(${col.character_maximum_length})`;
+      case "character":
+        return `CHAR(${col.character_maximum_length})`;
+      case "numeric":
+        return `NUMERIC(${col.numeric_precision},${col.numeric_scale})`;
+      case "timestamp without time zone":
+        return "TIMESTAMP";
+      case "time without time zone":
+        return "TIME";
+      default:
+        return col.data_type.toUpperCase();
+    }
+  }
+
+  // Valeur par défaut attendue en PostgreSQL (texte), ou null s'il n'y en a pas.
+  // PostgreSQL n'a pas de date zéro, et une chaîne vide n'a de sens que pour
+  // une colonne texte.
+  _pgDefault(field) {
+    const v = field.defaultsTo;
+    if (v === undefined || v === null) return null;
+    const t = field.type.toLowerCase();
+    if (t == "boolean") return v === true || v === "true" || v == 1 ? "1" : "0";
+    if (t == "json") {
+      try {
+        return JSON.stringify(typeof v == "object" ? v : JSON.parse(v));
+      } catch {
+        return null;
+      }
+    }
+    if (typeof v == "string" && v.startsWith("0000-00-00")) return null;
+    if (v === "" && !["VARCHAR", "CHAR", "TEXT"].some((p) => this._pgType(field).startsWith(p)))
+      return null;
+    return String(v);
+  }
+
+  // Valeur que reçoivent les lignes existantes quand une colonne devient NOT NULL.
+  _pgFallback(field) {
+    const d = this._pgDefault(field);
+    if (d !== null) return `'${d.replace(/'/g, "''")}'`;
+    const pgType = this._pgType(field);
+    if (pgType == "DATE") return "CURRENT_DATE";
+    if (pgType == "TIMESTAMP") return "CURRENT_TIMESTAMP";
+    if (pgType == "TIME") return "CURRENT_TIME";
+    if (pgType == "BYTEA") return "''::bytea";
+    if (/^(VARCHAR|CHAR|TEXT)/.test(pgType)) return "''";
+    return "0";
+  }
+
+  // migrate "alter" pour PostgreSQL : ajoute les colonnes manquantes et aligne
+  // le type, la valeur par défaut et le NOT NULL des colonnes existantes.
+  async _updateTablePg(def) {
+    const table = def.tableName.toLowerCase();
+    const cols =
+      (await this.connection.query(
+        `SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, is_nullable, column_default
+        FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?`,
+        [table],
+      )) || [];
+    const byName = {};
+    for (const col of cols) byName[col.column_name] = col;
+
+    const run = async (q) => {
+      this._logMigration(q);
+      await this.connection.query(q);
+    };
+    const quote = (v) => `'${v.replace(/'/g, "''")}'`;
+
+    for (const [fieldName, field] of Object.entries(def.attributes)) {
+      if (field.primary && field.autoincrement) continue; // SERIAL, géré à la création
+      if (!field.type) continue; // clé étrangère vers un modèle introuvable
+      const col = byName[fieldName.toLowerCase()];
+      const pgType = this._pgType(field);
+      const wantDefault = this._pgDefault(field);
+      const wantNotNull = field.notnull !== false;
+      const alter = `ALTER TABLE ${def.tableName}`;
+
+      if (!col) {
+        // Ajoutée sans NOT NULL, remplie, puis contrainte : un ADD … NOT NULL
+        // sans valeur par défaut échouerait sur une table déjà remplie.
+        let q = `${alter} ADD COLUMN ${fieldName} ${pgType}`;
+        if (wantDefault !== null) q += ` DEFAULT ${quote(wantDefault)}`;
+        await run(q);
+        if (wantNotNull) {
+          await run(
+            `UPDATE ${def.tableName} SET ${fieldName} = ${this._pgFallback(field)} WHERE ${fieldName} IS NULL`,
+          );
+          await run(`${alter} ALTER COLUMN ${fieldName} SET NOT NULL`);
+        }
+        continue;
+      }
+
+      // column_default ressemble à `'abc'::character varying` ou `2`.
+      let haveDefault = col.column_default;
+      if (this._pgColumnType(col) != pgType) {
+        // L'ancienne valeur par défaut, de l'ancien type, bloquerait la conversion :
+        // on la retire, elle est reposée juste après.
+        if (haveDefault !== null) await run(`${alter} ALTER COLUMN ${fieldName} DROP DEFAULT`);
+        haveDefault = null;
+        await run(
+          `${alter} ALTER COLUMN ${fieldName} TYPE ${pgType} USING ${fieldName}::${pgType}`,
+        );
+      }
+
+      if (haveDefault !== null) {
+        haveDefault = haveDefault.replace(/::[\w\s]+(\(\d+(,\d+)?\))?$/, "");
+        const m = /^'(.*)'$/s.exec(haveDefault);
+        if (m) haveDefault = m[1].replace(/''/g, "'");
+      }
+      const sameDefault =
+        haveDefault === wantDefault ||
+        (haveDefault !== null &&
+          wantDefault !== null &&
+          !isNaN(haveDefault) &&
+          !isNaN(wantDefault) &&
+          Number(haveDefault) === Number(wantDefault));
+      if (!sameDefault) {
+        if (wantDefault === null) await run(`${alter} ALTER COLUMN ${fieldName} DROP DEFAULT`);
+        else await run(`${alter} ALTER COLUMN ${fieldName} SET DEFAULT ${quote(wantDefault)}`);
+      }
+
+      const haveNotNull = col.is_nullable == "NO";
+      if (wantNotNull && !haveNotNull) {
+        await run(
+          `UPDATE ${def.tableName} SET ${fieldName} = ${this._pgFallback(field)} WHERE ${fieldName} IS NULL`,
+        );
+        await run(`${alter} ALTER COLUMN ${fieldName} SET NOT NULL`);
+      } else if (!wantNotNull && haveNotNull) {
+        await run(`${alter} ALTER COLUMN ${fieldName} DROP NOT NULL`);
+      }
+    }
+  }
+
   async updateIndexes(def) {
     let rows2;
     if (this.config.type == "sqlite3")
@@ -500,10 +694,9 @@ const MorphineDb = new (class {
   async synchronize(def) {
     let exists = true;
     try {
-      let rows1 = await this.connection.query(`SELECT * FROM ${def.tableName} LIMIT 0,1`, [], true);
-      if (rows1 && this.config.migrate == "recreate")
-        await this.connection.query(`DROP TABLE IF EXISTS ${def.tableName}`);
-      if (rows1 === null || this.config.migrate == "recreate") exists = false;
+      // LIMIT 1 : PostgreSQL ne connaît pas la forme LIMIT 0,1.
+      const rows1 = await this.connection.query(`SELECT * FROM ${def.tableName} LIMIT 1`, []);
+      if (rows1 === null) exists = false;
     } catch (error) {
       exists = false;
     }
@@ -512,6 +705,29 @@ const MorphineDb = new (class {
       if (!exists) await this.createTable(def);
       else await this.updateTable(def);
       await this.updateIndexes(def);
+    }
+  }
+
+  // migrate "recreate" : supprime les tables de tous les modèles, les tables
+  // référencées par une clé étrangère après celles qui les référencent.
+  async dropAllTables() {
+    const remaining = new Set(Object.values(this.models));
+    while (remaining.size) {
+      const referenced = new Set();
+      for (const model of remaining) {
+        for (const field of Object.values(model.def.attributes)) {
+          const target = field.model && this.models[field.model];
+          if (target && target !== model && remaining.has(target)) referenced.add(target);
+        }
+      }
+      let batch = [...remaining].filter((m) => !referenced.has(m));
+      if (!batch.length) batch = [...remaining]; // références circulaires
+      for (const model of batch) {
+        const q = `DROP TABLE IF EXISTS ${model.def.tableName}${this.config.type == "pg" ? " CASCADE" : ""}`;
+        this._logMigration(q);
+        await this.connection.query(q);
+        remaining.delete(model);
+      }
     }
   }
   _ormTypeToDatabaseType(field, info = "type") {
@@ -632,6 +848,7 @@ const MorphineDb = new (class {
     }
 
     if (info == "typejs") return typeJS;
+    if (this.config.type == "pg") return this._pgType(field);
     return res;
   }
   _getIndex(field, isAlter = false) {
@@ -658,12 +875,14 @@ const MorphineDb = new (class {
     return res;
   }
   _getDefault(field, fieldName = "") {
+    if (this.config.type == "pg") {
+      // PostgreSQL lit "…" comme un nom de colonne : il lui faut des apostrophes.
+      const d = this._pgDefault(field);
+      return d === null ? "" : ` DEFAULT '${d.replace(/'/g, "''")}'`;
+    }
     let defaultsTo = "";
     if (typeof field.defaultsTo !== "undefined") {
-      // PostgreSQL lit "…" comme un nom de colonne : il lui faut des apostrophes.
-      const quote = (v) =>
-        this.config.type == "pg" ? `'${String(v).replace(/'/g, "''")}'` : `"${v}"`;
-      defaultsTo = ` DEFAULT ${quote(field.defaultsTo)}`;
+      defaultsTo = ` DEFAULT "${field.defaultsTo}"`;
       if (field.type == "boolean" && (field.defaultsTo === true || field.defaultsTo === "true"))
         defaultsTo = " DEFAULT 1";
       if (field.type == "boolean" && (field.defaultsTo === false || field.defaultsTo === "false"))
@@ -671,27 +890,14 @@ const MorphineDb = new (class {
       if (field.type == "json") {
         try {
           if (typeof field.defaultsTo == "object") {
-            const json = JSON.stringify(field.defaultsTo);
-            defaultsTo =
-              this.config.type == "pg"
-                ? ` DEFAULT ${quote(json)}`
-                : ` DEFAULT "${json.replace(/"/g, '\\"')}"`;
+            defaultsTo = ` DEFAULT "${JSON.stringify(field.defaultsTo).replace(/"/g, '\\"')}"`;
           } else {
-            const json = JSON.stringify(JSON.parse(field.defaultsTo));
-            defaultsTo =
-              this.config.type == "pg"
-                ? ` DEFAULT ${quote(json)}`
-                : ` DEFAULT "${json.replace(/"/g, '\\"')}"`;
+            defaultsTo = ` DEFAULT "${JSON.stringify(JSON.parse(field.defaultsTo)).replace(/"/g, '\\"')}"`;
           }
         } catch (error) {
           defaultsTo = "";
           console.warn(clc.red(`defaultsTo '${fieldName}' must be a valid Json object`));
         }
-      }
-      if (this.config.type == "pg") {
-        if (!field.defaultsTo) defaultsTo = "";
-        if (field.defaultsTo == "0000-00-00" || field.defaultsTo == "0000-00-00 00:00:00")
-          defaultsTo = "";
       }
     }
     return defaultsTo;
@@ -771,9 +977,23 @@ async function loadModels(dir, silently = false) {
       field.length = target.primaryField.length || 11;
     }
   }
-  if (MorphineDb.config.migrate == "alter") {
-    // console.log("d2b = ", new Date() - d);
-    // d = new Date();
+  const { migrate } = MorphineDb.config;
+  if (migrate == "alter" || migrate == "recreate") {
+    if (migrate == "recreate") {
+      if (process.env.NODE_ENV == "production") {
+        throw new Error(
+          'migrate: "recreate" efface toutes les données des modèles : refusé quand NODE_ENV=production.',
+        );
+      }
+      console.warn(
+        clc.red(
+          '@Warning - migrate: "recreate" : suppression et recréation de toutes les tables des modèles',
+        ),
+      );
+      await MorphineDb.dropAllTables();
+    }
+    // Les contraintes relevées lors d'un précédent loadModels() ne valent plus.
+    MorphineDb._referentialConstraints = null;
 
     for (const model of Object.values(MorphineDb.models)) {
       await MorphineDb.synchronize(model.def);

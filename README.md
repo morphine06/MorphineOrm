@@ -81,6 +81,7 @@ module.exports = function () {
         type: "string",
         defaultsTo: "",
         index: true,
+        validator: { fn: "isLength", args: { min: 2, max: 255 } },
       },
       birth: {
         type: "date",
@@ -136,26 +137,42 @@ The model name is the file name without `.model.js`. Every model gets two `datet
 
 #### Attribute options
 
-| Option          | Description                                                                  |
-| --------------- | ---------------------------------------------------------------------------- |
-| `type`          | column type (see below)                                                      |
-| `length`        | column length, e.g. `100` for a `VARCHAR(100)` or `"12,4"` for a decimal     |
-| `primary`       | primary key                                                                  |
-| `autoincrement` | auto-incremented column                                                      |
-| `defaultsTo`    | default value, used in the table definition and when a value is missing     |
-| `notnull`       | columns are `NOT NULL` by default; set `notnull: false` to allow `NULL`      |
-| `index`         | create an index on the column                                                |
-| `model`         | foreign key to another model; the column takes the type of its primary key   |
-| `alias`         | name of the associated object, used by `populate()`                          |
-| `onDelete`      | `RESTRICT`, `CASCADE` or `SET NULL`; creates the foreign key constraint      |
-| `onUpdate`      | `RESTRICT`, `CASCADE` or `SET NULL`; creates the foreign key constraint      |
+| Option          | Description                                                                |
+| --------------- | -------------------------------------------------------------------------- |
+| `type`          | column type (see below)                                                    |
+| `length`        | column length, e.g. `100` for a `VARCHAR(100)` or `"12,4"` for a decimal   |
+| `primary`       | primary key                                                                |
+| `autoincrement` | auto-incremented column                                                    |
+| `defaultsTo`    | default value, used in the table definition and when a value is missing    |
+| `notnull`       | columns are `NOT NULL` by default; set `notnull: false` to allow `NULL`    |
+| `index`         | create an index on the column                                              |
+| `model`         | foreign key to another model; the column takes the type of its primary key |
+| `alias`         | name of the associated object, used by `populate()`                        |
+| `onDelete`      | `RESTRICT`, `CASCADE` or `SET NULL`; creates the foreign key constraint    |
+| `onUpdate`      | `RESTRICT`, `CASCADE` or `SET NULL`; creates the foreign key constraint    |
+| `validator`     | `{ fn, args }`: a rule checked before each write (see below)               |
 
 #### Types
 
 `integer` (or `int`), `tinyint`, `smallint`, `mediumint`, `bigint`, `float`, `double`, `decimal` (or `price`), `boolean`, `string` (or `varchar`), `char`, `text`, `tinytext`, `mediumtext`, `longtext`, `json`, `date`, `datetime`, `time`, `year`, `blob`, `tinyblob`, `mediumblob`, `longblob`, `binary`, `varbinary`, `bit`, `enum`, `set`.
 
 - `json` is stored as text: objects are serialized on write and parsed on read.
-- `boolean` is stored as a tinyint and read back as `true` / `false`.
+- `boolean` is stored as a tinyint (a smallint on PostgreSQL) and read back as `true` / `false`.
+
+#### Validation
+
+`validator: { fn, args }` checks the value with the function `fn` of the [validator](https://github.com/validatorjs/validator.js#validators) library (`isEmail`, `isLength`, `isInt`, `isIn`…), called with the value as a string and `args` as options. The rule applies to the attributes present in the data of `create()`, `update()`, `updateone()` and `replace()`; `null` values are not checked.
+
+When a rule fails, nothing is written and `exec()` throws an error, whatever `catchError` is:
+
+```js
+try {
+  await Dogs.create({ name: "R" }).exec();
+} catch (error) {
+  // error.code = "E_VALIDATION"
+  // error.errors = [{ field: "name", error: "isLength", args: { min: 2, max: 255 }, value: "R" }]
+}
+```
 
 ### 2. Initialize the ORM
 
@@ -168,7 +185,7 @@ const { MorphineDb, loadModels } = require("morphine-orm");
 await MorphineDb.init({
   // options for the ORM
   type: "mysql2", // mysql2, pg, sqlite3
-  migrate: "alter", // alter or safe
+  migrate: "alter", // alter, safe or recreate
   debug: false,
   catchError: true,
 
@@ -183,8 +200,9 @@ await MorphineDb.init({
 await loadModels("./models");
 ```
 
-- `migrate: "alter"` creates the missing tables, adds the missing columns and indexes, changes the columns whose type or default value changed, and creates the foreign key constraints. It never drops a table or a column.
+- `migrate: "alter"` creates the missing tables, adds the missing columns and indexes, changes the columns whose type, default value or `NOT NULL` changed, and creates the foreign key constraints. It never drops a table or a column. On PostgreSQL, a column that becomes `NOT NULL` first gets its default value (or `0`, `""`, the current date) where it is `NULL`, and a type change converts the values with `USING column::type`, which fails if a value cannot be converted. SQLite cannot modify a column: the change is only logged.
 - `migrate: "safe"` (default) leaves the database untouched.
+- `migrate: "recreate"` drops the tables of all the models, then creates them again: **all their data is deleted** at each start. It is refused when `NODE_ENV=production`.
 - `debug: true` logs every SQL query.
 - `catchError: true` throws database errors. With `catchError: false` (default), errors are logged and the query returns `null` (or an empty array for a select).
 - `quietMigration: true` hides the logs of the schema changes made by `migrate: "alter"`.
@@ -233,8 +251,9 @@ const jazz = await Dogs.create({ name: "Jazz", birth: "2019-10-06", kindId: 1 })
 //    kind: { id: 1, name: "Labrador", … },
 // }
 
-// exec(false) returns only the id of the new record
+// exec(false), or returnRow(false), returns only the id of the new record
 const id = await Dogs.create({ name: "Newton" }).exec(false);
+const id2 = await Dogs.create({ name: "Newton" }).returnRow(false).exec();
 ```
 
 Missing attributes take their `defaultsTo` value (or `0` / `""` according to their type).
@@ -251,6 +270,14 @@ const names = await Dogs.find().select(["name", "birth"]).exec(); // or .select(
 
 // sort
 const sorted = await Dogs.find().orderBy("Dogs.birth DESC").exec();
+
+// group
+const byKind = await Dogs.find()
+  .select("Dogs.kindId, count(*) AS nb")
+  .groupBy("Dogs.kindId")
+  .having("count(*) > 1")
+  .exec();
+// byKind = [{ kindId: 1, nb: 3 }] (nb is the string "3" on PostgreSQL, where count() is a bigint)
 
 // count (only a COUNT() query is sent)
 const nb = await Dogs.count({ kindId: 1 }).exec();
@@ -316,7 +343,7 @@ Only the attributes of the model are written; other keys are ignored. `updatedAt
 await Dogs.destroy(1).exec();
 await Dogs.destroy({ kindId: 1 }).exec();
 await Dogs.destroy("kindId=?", [1]).exec();
-// returns the number of deleted rows (MySQL / MariaDB)
+// returns the number of deleted rows
 
 await Dogs.truncate().exec(); // empty the table
 await Dogs.drop().exec(); // drop the table
@@ -338,13 +365,13 @@ const rows2 = await Dogs.query("SELECT * FROM dogs WHERE kindId=?", [1]).exec();
 
 A model can define these async functions:
 
-| Hook                             | Called before | `this` and arguments                             |
-| -------------------------------- | ------------- | ------------------------------------------------ |
-| `beforeCreate(data)`             | an INSERT     | the data to insert, which you can modify         |
-| `beforeUpdate(data)`             | an UPDATE     | the data to update, which you can modify         |
-| `beforeDestroy(where, whereData)` | a DELETE      | the condition and its values                     |
-| `beforeTruncate()`               | a TRUNCATE    |                                                  |
-| `beforeDrop()`                   | a DROP        |                                                  |
+| Hook                              | Called before | `this` and arguments                     |
+| --------------------------------- | ------------- | ---------------------------------------- |
+| `beforeCreate(data)`              | an INSERT     | the data to insert, which you can modify |
+| `beforeUpdate(data)`              | an UPDATE     | the data to update, which you can modify |
+| `beforeDestroy(where, whereData)` | a DELETE      | the condition and its values             |
+| `beforeTruncate()`                | a TRUNCATE    |                                          |
+| `beforeDrop()`                    | a DROP        |                                          |
 
 ### 11. Other methods
 
@@ -393,4 +420,4 @@ The tests create, empty and drop the tables of the models in `/models`: use a de
 
 ## License
 
-ISC
+[MIT](LICENSE)

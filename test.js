@@ -11,13 +11,16 @@ const DB_TYPE = process.argv[2] || "mysql2";
 // Code d'erreur renvoyé par chaque driver pour une table inexistante.
 const NO_SUCH_TABLE = { mysql2: "ER_NO_SUCH_TABLE", sqlite3: "SQLITE_ERROR", pg: "42P01" };
 
-function dbConfig() {
-  const common = { type: DB_TYPE, migrate: "alter", debug: false, catchError: true, quietMigration: true };
-  if (DB_TYPE === "sqlite3") {
-    // fichier jetable, recréé à chaque lancement
-    if (fs.existsSync("./morphineorm-test.sqlite")) fs.unlinkSync("./morphineorm-test.sqlite");
-    return { ...common, database: "morphineorm-test" };
-  }
+function dbConfig(overrides = {}) {
+  const common = {
+    type: DB_TYPE,
+    migrate: "alter",
+    debug: false,
+    catchError: true,
+    quietMigration: true,
+    ...overrides,
+  };
+  if (DB_TYPE === "sqlite3") return { ...common, database: "morphineorm-test" };
   if (DB_TYPE === "pg") {
     return {
       ...common,
@@ -47,6 +50,8 @@ function dbConfig() {
 
 async function initApp() {
   console.log(`# Tests sur ${DB_TYPE}`);
+  // SQLite : fichier jetable, recréé à chaque lancement
+  if (fs.existsSync("./morphineorm-test.sqlite")) fs.unlinkSync("./morphineorm-test.sqlite");
   await MorphineDb.init(dbConfig());
   await loadModels();
 }
@@ -339,6 +344,137 @@ initApp().then(async () => {
       birth: "2022-01-01",
     }).exec();
     console.log("🚀 ~ awaittest ~ animalCharly:", animalCharly);
+    // after
+    await truncateAll();
+  });
+
+  await test("Test validator refuse create() et update()", async () => {
+    // before
+    let species = await Species.create({ name: "Dog" }).exec();
+    let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+    // test : name doit faire de 2 à 255 caractères
+    await assert.rejects(Animals.create({ name: "A", breedId: breed.id }).exec(), (error) => {
+      assert.strictEqual(error.code, "E_VALIDATION");
+      assert.strictEqual(error.errors[0].field, "name");
+      assert.strictEqual(error.errors[0].error, "isLength");
+      return true;
+    });
+    assert.strictEqual(await Animals.count().exec(), 0);
+    const rex = await Animals.create({ name: "Rex", breedId: breed.id }).exec();
+    await assert.rejects(Animals.updateone(rex.id, { name: "R" }).exec(), { code: "E_VALIDATION" });
+    assert.strictEqual((await Animals.findone(rex.id).exec()).name, "Rex");
+    // after
+    await truncateAll();
+  });
+
+  await test("Test groupBy() et having()", async () => {
+    // before
+    let species = await Species.create({ name: "Dog" }).exec();
+    let labrador = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+    let chiwawa = await Breeds.create({ name: "Chiwawa", speciesId: species.id }).exec();
+    await Animals.create({ name: "Charly", breedId: labrador.id }).exec();
+    await Animals.create({ name: "Rex", breedId: labrador.id }).exec();
+    await Animals.create({ name: "Jazz", breedId: chiwawa.id }).exec();
+    // test
+    const all = await Animals.find()
+      .select("Animals.breedId, count(*) AS nb")
+      .groupBy("Animals.breedId")
+      .exec();
+    assert.strictEqual(all.length, 2);
+    const many = await Animals.find()
+      .select("Animals.breedId, count(*) AS nb")
+      .groupBy("Animals.breedId")
+      .having("count(*) > 1")
+      .exec();
+    assert.strictEqual(many.length, 1);
+    assert.strictEqual(Number(many[0].nb), 2);
+    // count() ignore l'ordre, que PostgreSQL refuserait sans GROUP BY
+    assert.strictEqual(await Animals.count().orderBy("Animals.name").exec(), 3);
+    // after
+    await truncateAll();
+  });
+
+  await test("Test returnRow(false)", async () => {
+    const id = await Species.create({ name: "Bird" }).returnRow(false).exec();
+    assert.strictEqual(typeof id, "number");
+    const nb = await Species.updateone(id, { name: "Bird 2" }).returnRow(false).exec();
+    assert.strictEqual(nb, 1);
+    // after
+    await truncateAll();
+  });
+
+  await test("Test destroy() renvoie le nombre de lignes", async () => {
+    await Species.create({ name: "Fish" }).exec();
+    await Species.create({ name: "Fish" }).exec();
+    await Species.create({ name: "Bird" }).exec();
+    assert.strictEqual(await Species.destroy({ name: "Fish" }).exec(), 2);
+    assert.strictEqual(await Species.count().exec(), 1);
+    // after
+    await truncateAll();
+  });
+
+  await test("Test truncate()", async () => {
+    let species = await Species.create({ name: "Dog" }).exec();
+    let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+    await Animals.create({ name: "Charly", breedId: breed.id }).exec();
+    await Animals.truncate().exec();
+    assert.strictEqual(await Animals.count().exec(), 0);
+    const rex = await Animals.create({ name: "Rex", breedId: breed.id }).exec();
+    assert.strictEqual(rex.id, 1); // l'autoincrement repart de 1
+    // after
+    await truncateAll();
+  });
+
+  await test("Test migrate alter : colonne supprimée puis rétablie", async () => {
+    await MorphineDb.query(`ALTER TABLE ${Animals.def.tableName} DROP COLUMN legs`);
+    await loadModels();
+    let species = await Species.create({ name: "Dog" }).exec();
+    let breed = await Breeds.create({ name: "Labrador", speciesId: species.id }).exec();
+    const rex = await Animals.create({ name: "Rex", breedId: breed.id }).exec();
+    assert.strictEqual(rex.legs, 2); // valeur par défaut de la colonne recréée
+    // after
+    await truncateAll();
+  });
+
+  await test(
+    "Test migrate alter : type, défaut et NOT NULL rétablis",
+    { skip: DB_TYPE === "sqlite3" && "SQLite ne sait pas modifier une colonne" },
+    async () => {
+      const table = Animals.def.tableName;
+      if (DB_TYPE === "pg") {
+        await MorphineDb.query(
+          `ALTER TABLE ${table} ALTER COLUMN legs TYPE VARCHAR(20), ALTER COLUMN legs DROP NOT NULL, ALTER COLUMN legs SET DEFAULT '7'`,
+        );
+      } else {
+        await MorphineDb.query(`ALTER TABLE ${table} MODIFY legs VARCHAR(20) NULL DEFAULT '7'`);
+      }
+      await loadModels();
+      const schema = DB_TYPE === "pg" ? "current_schema()" : "DATABASE()";
+      const [col] = await MorphineDb.query(
+        `SELECT data_type AS t, is_nullable AS n, column_default AS d FROM information_schema.columns WHERE table_schema = ${schema} AND LOWER(table_name) = ? AND column_name = 'legs'`,
+        [table.toLowerCase()],
+      );
+      assert.strictEqual(col.t, DB_TYPE === "pg" ? "integer" : "int");
+      assert.strictEqual(col.n, "NO");
+      assert.strictEqual(Number(col.d), 2);
+    },
+  );
+
+  await test("Test migrate recreate", async () => {
+    await Species.create({ name: "Dog" }).exec();
+    await MorphineDb.close();
+    // refusé en production
+    const env = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    await MorphineDb.init(dbConfig({ migrate: "recreate" }));
+    await assert.rejects(loadModels(), /NODE_ENV=production/);
+    process.env.NODE_ENV = env;
+    assert.strictEqual(await Species.count().exec(), 1); // rien n'a été supprimé
+    // sinon, toutes les tables sont vidées
+    await loadModels();
+    assert.strictEqual(await Species.count().exec(), 0);
+    const bird = await Species.create({ name: "Bird" }).exec();
+    assert.strictEqual(bird.id, 1);
   });
 
   await MorphineDb.close();

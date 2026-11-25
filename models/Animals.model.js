@@ -23,7 +23,7 @@ module.exports = function mymodel() {
         index: true,
         validator: {
           fn: "isLength",
-          args: { min: 10, max: 255 },
+          args: { min: 2, max: 255 },
         },
       },
       birth: {

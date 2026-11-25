@@ -11,10 +11,12 @@
     "test-mysql": "node test.js mysql2",
     "test-sqlite": "node test.js sqlite3",
     "test-pg": "node test.js pg",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "format": "prettier --write \"**/*.{js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{js,json,md}\""
   },
   "author": "David Miglior",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "cli-color": "^2.0.4",
     "dayjs": "^1.11.23",
@@ -27,6 +29,7 @@
     "globals": "^17.14.0",
     "mysql2": "^3.24.6",
     "pg": "^8.23.1",
+    "prettier": "^3.10.1",
     "sqlite3": "^6.0.1"
   },
   "engines": {

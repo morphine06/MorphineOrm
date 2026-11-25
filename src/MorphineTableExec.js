@@ -46,8 +46,9 @@ class MorphineTableExec {
     this.whereData = [];
     this.onlyOne = false;
     this.order = "";
-    this.having = "";
-    this.groupby = "";
+    // _having / _groupBy : une propriété `having` masquerait la méthode having().
+    this._having = "";
+    this._groupBy = "";
     this.tabAlreadyIncluded = {};
     this.logQuery = false;
     // this.catchErr = false;
@@ -253,11 +254,11 @@ class MorphineTableExec {
     return this;
   }
   groupBy(groupby) {
-    this.groupby = groupby;
+    this._groupBy = groupby;
     return this;
   }
   having(having) {
-    this.having = having;
+    this._having = having;
     return this;
   }
 
@@ -345,7 +346,11 @@ class MorphineTableExec {
   }
 
   _createOrder() {
-    return this.order ? `ORDER BY ${this.order}` : "";
+    let res = "";
+    if (this._groupBy) res += `GROUP BY ${this._groupBy} `;
+    if (this._having) res += `HAVING ${this._having} `;
+    if (this.order) res += `ORDER BY ${this.order}`;
+    return res;
   }
 
   _createSelectQuery() {
@@ -353,7 +358,8 @@ class MorphineTableExec {
     const what = this.iscount
       ? `count(${this.modelname}.${this.primary}) as cmpt`
       : this._createSelect();
-    return `SELECT ${what} FROM ${this._createJoin()} WHERE ${this._createWhere()} ${this._createOrder()}`;
+    const tail = this.iscount ? "" : this._createOrder();
+    return `SELECT ${what} FROM ${this._createJoin()} WHERE ${this._createWhere()} ${tail}`;
   }
 
   async _createInsertQuery() {
@@ -430,8 +436,10 @@ class MorphineTableExec {
   }
   _createTruncateQuery() {
     let query;
-    if (this.MorphineDb.config.type == "sqlite3")
-      query = `DELETE FROM ${this.def.tableName}; delete from sqlite_sequence where name='${this.def.tableName}'; VACUUM;`;
+    if (this.MorphineDb.config.type == "sqlite3") query = `DELETE FROM ${this.def.tableName}`;
+    // RESTART IDENTITY : PostgreSQL ne remet pas la séquence SERIAL à zéro sans cela
+    else if (this.MorphineDb.config.type == "pg")
+      query = `TRUNCATE ${this.def.tableName} RESTART IDENTITY`;
     else query = `TRUNCATE ${this.def.tableName}`;
     return query;
   }
@@ -688,20 +696,37 @@ class MorphineTableExec {
     if (fn) await fn.call(this.data, this.data);
     else if (fn2) await fn2.call(this, this.where, this.whereData);
   }
+  // Règles `validator: { fn, args }` des attributs, appliquées aux champs fournis.
+  // fn est une fonction de la bibliothèque validator (isEmail, isLength…), qui
+  // reçoit la valeur en chaîne et args en options.
   _validate() {
     const errors = [];
     const attrs = this.def.attributes;
     for (const fieldName of this._meta.validatableFields) {
-      if (this.data[fieldName] === undefined) continue;
-      const field = attrs[fieldName];
-      if (!validator[field.validator.fn](this.data[fieldName])) {
-        errors.push({ field: fieldName, error: field.validator.fn, args: field.validator.args });
+      const value = this.data[fieldName];
+      if (value === undefined || value === null) continue;
+      const { fn, args } = attrs[fieldName].validator;
+      if (typeof validator[fn] !== "function") {
+        throw new Error(`${this.modelname}.${fieldName} : validator "${fn}" inconnu`);
+      }
+      if (!validator[fn](String(value), args)) {
+        errors.push({ field: fieldName, error: fn, args, value });
       }
     }
     return errors;
   }
 
-  async exec(returnCompleteRow = true) {
+  _throwIfInvalid() {
+    const errors = this._validate();
+    if (!errors.length) return;
+    const list = errors.map((e) => `${e.field} (${e.error})`).join(", ");
+    const err = new Error(`${this.modelname} : validation refusée pour ${list}`);
+    err.code = "E_VALIDATION";
+    err.errors = errors;
+    throw err;
+  }
+
+  async exec(returnCompleteRow = this.returnCompleteRow) {
     if (this.command == "REPLACE") {
       let w = "0",
         wData = [];
@@ -732,12 +757,12 @@ class MorphineTableExec {
         query = this.querySaved;
         break;
       case "INSERT":
-        this._validate();
+        this._throwIfInvalid();
         this._preTreatment();
         query = await this._createInsertQuery();
         break;
       case "UPDATE":
-        this._validate();
+        this._throwIfInvalid();
         this._preTreatment();
         query = this._createUpdateQuery();
         break;
@@ -755,12 +780,17 @@ class MorphineTableExec {
     }
 
     if (this.def.debug || this.logQuery) console.warn(clc.yellow("query:"), query, this.whereData);
-    let rows;
-    // try {
-    rows = await this.connection.query(query, this.whereData);
-    // } catch (error) {
-    // 	throw error;
-    // }
+    const rows = await this.connection.query(query, this.whereData);
+    if (this.command == "TRUNCATE" && this.MorphineDb.config.type == "sqlite3") {
+      // remet à zéro l'autoincrement, comme le TRUNCATE de MySQL
+      try {
+        await this.connection.query("DELETE FROM sqlite_sequence WHERE name=?", [
+          this.def.tableName,
+        ]);
+      } catch {
+        /* pas de table sqlite_sequence : aucun AUTOINCREMENT dans la base */
+      }
+    }
     let data = await this.postTreatmentMain(rows, returnCompleteRow);
     return data;
     // }
@@ -805,8 +835,7 @@ class MorphineTableExec {
         break;
       case "INSERT":
         if (this.MorphineDb.config.type == "sqlite3") {
-          let lastinsert = await this.MorphineDb.query("SELECT last_insert_rowid()");
-          res = lastinsert[0]["last_insert_rowid()"];
+          res = rows.insertId;
         } else if (this.MorphineDb.config.type == "pg") {
           res = rows[0][this.primary];
         } else {
@@ -815,7 +844,8 @@ class MorphineTableExec {
         if (res) this.data[this.primary] = res;
         break;
       default:
-        if (this.iscount) res = Number(rows[0].cmpt); // PostgreSQL rend COUNT() en bigint, donc en chaîne
+        if (this.iscount)
+          res = Number(rows[0].cmpt); // PostgreSQL rend COUNT() en bigint, donc en chaîne
         else {
           rows = this._postTreatment(rows);
           if (this.onlyOne) {

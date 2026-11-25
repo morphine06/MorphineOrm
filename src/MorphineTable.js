@@ -4,7 +4,6 @@ class MorphineTable {
   constructor(def, MorphineDb) {
     this.MorphineDb = MorphineDb;
     this.def = def;
-    this.connection = MorphineDb.connection;
     this.modelname = this.def.modelname;
     this.primary = "";
     // this.primaryType = "integer";
@@ -51,7 +50,7 @@ class MorphineTable {
       ) {
         meta.notNullFields.add(fieldName);
       }
-      if (field.validator && field.validator.fn && field.validator.args) {
+      if (field.validator && field.validator.fn) {
         meta.validatableFields.push(fieldName);
       }
       if (field.model) {
@@ -64,6 +63,11 @@ class MorphineTable {
     meta.insertFieldsList = meta.insertableFields.join(", ");
     meta.insertPlaceholdersList = meta.insertableFields.map(() => "?").join(", ");
     this._meta = meta;
+  }
+  // Lue à chaque requête : après close() puis init(), un modèle déjà obtenu
+  // utilise la nouvelle connexion.
+  get connection() {
+    return this.MorphineDb.connection;
   }
   createEmpty(options = {}) {
     let opts = {
