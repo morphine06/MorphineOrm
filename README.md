@@ -137,20 +137,60 @@ The model name is the file name without `.model.js`. Every model gets two `datet
 
 #### Attribute options
 
-| Option          | Description                                                                |
-| --------------- | -------------------------------------------------------------------------- |
-| `type`          | column type (see below)                                                    |
-| `length`        | column length, e.g. `100` for a `VARCHAR(100)` or `"12,4"` for a decimal   |
-| `primary`       | primary key                                                                |
-| `autoincrement` | auto-incremented column                                                    |
-| `defaultsTo`    | default value, used in the table definition and when a value is missing    |
-| `notnull`       | columns are `NOT NULL` by default; set `notnull: false` to allow `NULL`    |
-| `index`         | create an index on the column                                              |
-| `model`         | foreign key to another model; the column takes the type of its primary key |
-| `alias`         | name of the associated object, used by `populate()`                        |
-| `onDelete`      | `RESTRICT`, `CASCADE` or `SET NULL`; creates the foreign key constraint    |
-| `onUpdate`      | `RESTRICT`, `CASCADE` or `SET NULL`; creates the foreign key constraint    |
-| `validator`     | `{ fn, args }`: a rule checked before each write (see below)               |
+| Option          | Description                                                                                                                                    |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`          | column type (see below)                                                                                                                        |
+| `length`        | column length, e.g. `100` for a `VARCHAR(100)` or `"12,4"` for a decimal                                                                       |
+| `primary`       | primary key                                                                                                                                    |
+| `autoincrement` | auto-incremented column                                                                                                                        |
+| `defaultsTo`    | default value, used in the table definition and when a value is missing; or a function `(data) => value` computed at each creation (see below) |
+| `onUpdate`      | a function `(data) => value` computed at each update when the attribute is not in the data (a string is a foreign key rule, see below)         |
+| `unique`        | create a unique index on the column                                                                                                            |
+| `values`        | the list of the values of an `enum`                                                                                                            |
+| `notnull`       | columns are `NOT NULL` by default; set `notnull: false` to allow `NULL`                                                                        |
+| `index`         | create an index on the column                                                                                                                  |
+| `model`         | foreign key to another model; the column takes the type of its primary key                                                                     |
+| `alias`         | name of the associated object, used by `populate()`                                                                                            |
+| `onDelete`      | `RESTRICT`, `CASCADE` or `SET NULL`; creates the foreign key constraint                                                                        |
+| `onUpdate`      | `RESTRICT`, `CASCADE` or `SET NULL`; creates the foreign key constraint                                                                        |
+| `validator`     | `{ fn, args }`: a rule checked before each write (see below)                                                                                   |
+
+#### Computed values
+
+```js
+attributes: {
+  code: { type: "string", defaultsTo: () => crypto.randomUUID() },
+  slug: { type: "string", defaultsTo: (data) => data.title.toLowerCase() },
+  editedBy: { type: "string", defaultsTo: "", onUpdate: (data) => currentUser() },
+},
+```
+
+A `defaultsTo` function runs at each `create()` / `createMany()` when the attribute is missing or `null` (and in `createEmpty()`); the column has no `DEFAULT` in the database. An `onUpdate` function runs at each `update()` / `updateone()` when the attribute is not in the data. Both run after the `beforeCreate` / `beforeUpdate` hooks, so that a hook can provide the value.
+
+#### Indexes and constraints
+
+```js
+module.exports = function () {
+  return {
+    attributes: {
+      id: { type: "integer", autoincrement: true, primary: true },
+      email: { type: "string", defaultsTo: "", unique: true },
+      firstname: { type: "string", defaultsTo: "" },
+      lastname: { type: "string", defaultsTo: "" },
+      age: { type: "integer", defaultsTo: 0 },
+    },
+    // composite indexes, unique or not (name optional)
+    indexes: [
+      { fields: ["lastname", "firstname"] },
+      { fields: ["firstname", "age"], unique: true, name: "members_firstname_age_u" },
+    ],
+    // CHECK constraints: name → SQL expression
+    checks: { age_positive: "age >= 0" },
+  };
+};
+```
+
+`migrate: "alter"` creates the missing indexes and constraints, also on an existing table. It never changes the data: if the table has duplicates for a unique index, or rows that break a constraint, the index or constraint is not created and a warning says so; it is created at the next start once the data is fixed. Indexes and constraints removed from the model are not dropped. SQLite cannot add a constraint to an existing table.
 
 #### Types
 
@@ -158,6 +198,7 @@ The model name is the file name without `.model.js`. Every model gets two `datet
 
 - `json` is stored as text: objects are serialized on write and parsed on read.
 - `boolean` is stored as a tinyint (a smallint on PostgreSQL) and read back as `true` / `false`.
+- `enum` takes its list in `values: ["S", "M", "L"]`. Without `defaultsTo`, a missing value is the first one. A value out of the list is refused before the write (`E_VALIDATION` error, `error: "enum"`). In the database it is an `ENUM` on MySQL, and a text column with a `CHECK` on PostgreSQL and SQLite; `migrate: "alter"` follows the changes of the list (except on SQLite).
 
 #### Validation
 
@@ -286,6 +327,17 @@ const id2 = await Dogs.create({ name: "Newton" }).returnRow(false).exec();
 
 Missing attributes take their `defaultsTo` value (or `0` / `""` according to their type).
 
+`createMany(rows)` creates several records and returns them in the same order (or their ids with `returnRow(false)`). Each row goes through the hooks, the computed values and the validation; it is all or nothing, in a single transaction. The rows are inserted by batches of one query (with `RETURNING` on PostgreSQL, SQLite and MariaDB 10.5+), or one query per row on MySQL, where only that gives reliable ids.
+
+```js
+const dogs = await Dogs.createMany([
+  { name: "Rex", kindId: 1 },
+  { name: "Jazz", kindId: 1 },
+])
+  .populate("kind")
+  .exec();
+```
+
 ### 5. Find records
 
 ```js
@@ -307,8 +359,17 @@ const byKind = await Dogs.find()
   .exec();
 // byKind = [{ kindId: 1, nb: 3 }] (nb is the string "3" on PostgreSQL, where count() is a bigint)
 
+// pagination
+const page2 = await Dogs.find().orderBy("Dogs.name").limit(20).offset(20).exec();
+
 // count (only a COUNT() query is sent)
 const nb = await Dogs.count({ kindId: 1 }).exec();
+
+// sum, average, minimum, maximum (null when no row matches)
+const total = await Dogs.sum("legs").exec();
+const average = await Dogs.avg("legs", { kindId: 1 }).exec();
+const youngest = await Dogs.max("birth", "kind.name=?", ["Labrador"]).populate("kind").exec();
+const oldest = await Dogs.min("birth").exec();
 ```
 
 ### 6. Associations
@@ -338,6 +399,8 @@ const kinds = await Kinds.find().onetomany("Dogs", "kind", "dogs").populateAll()
 //    { id: 1, name: "Labrador", dogs: [{ id: 1, name: "Rex", … }, { id: 2, name: "Jazz", … }] },
 // ]
 ```
+
+With `onetomany()`, `limit()` and `offset()` count the parents, not their children: a first query chooses the parents of the page (the `orderBy()` must then only use their columns), and the second one loads them with all their children.
 
 #### Many-to-many
 
@@ -428,6 +491,16 @@ A model can define these async functions:
 | `beforeDestroy(where, whereData)` | a DELETE      | the condition and its values             |
 | `beforeTruncate()`                | a TRUNCATE    |                                          |
 | `beforeDrop()`                    | a DROP        |                                          |
+
+And these ones, called once the write is done, with `this` = the model:
+
+| Hook                                    | Called after                  | Arguments                                                     |
+| --------------------------------------- | ----------------------------- | ------------------------------------------------------------- |
+| `afterCreate(row, data)`                | each created record           | the created record (complete, or the data with its id)        |
+| `afterUpdate(result, data)`             | an `update()` / `updateone()` | what `exec()` returns (row, rows or number of rows), the data |
+| `afterDestroy(count, where, whereData)` | a `destroy()`                 | the number of deleted rows, the condition and its values      |
+
+In a transaction, the queries of an `after*` hook belong to it, and are rolled back with it. An error thrown by an `after*` hook makes `exec()` throw, but the write is already done (unless it is in a transaction).
 
 ### 12. Other methods
 

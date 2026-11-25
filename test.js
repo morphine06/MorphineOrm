@@ -1320,6 +1320,413 @@ initApp().then(async () => {
     await truncateAll();
   });
 
+  await test("limit() et offset()", async () => {
+    for (const name of ["C", "A", "E", "B", "D"]) await Species.create({ name }).exec();
+    const names = (rows) => rows.map((r) => r.name);
+    const sorted = () => Species.find().orderBy("Species.name");
+    assert.deepStrictEqual(names(await sorted().limit(2).exec()), ["A", "B"]);
+    assert.deepStrictEqual(names(await sorted().limit(2).offset(2).exec()), ["C", "D"]);
+    assert.deepStrictEqual(names(await sorted().offset(4).exec()), ["E"]); // OFFSET sans LIMIT
+    assert.deepStrictEqual(await sorted().limit(0).exec(), []);
+    assert.deepStrictEqual(await sorted().offset(10).exec(), []);
+    for (const bad of [-1, 1.5, "2", null]) {
+      assert.throws(() => Species.find().limit(bad), TypeError);
+      assert.throws(() => Species.find().offset(bad), TypeError);
+    }
+    // count() ignore la pagination ; findone() ne lit qu'une ligne
+    assert.strictEqual(await Species.count().limit(1).exec(), 5);
+    const logs = await captureWarnings(() => Species.findone({ name: "A" }).debug().exec());
+    assert.match(logs, /LIMIT 1/);
+    // after
+    await truncateAll();
+  });
+
+  await test("limit() avec populate() et onetomany() : la page compte les parents", async () => {
+    const species = await Species.create({ name: "Dog" }).exec();
+    const breeds = {};
+    for (const [name, n] of [
+      ["B1", 3],
+      ["B2", 1],
+      ["B3", 2],
+    ]) {
+      breeds[name] = await Breeds.create({ name, speciesId: species.id }).exec();
+      for (let i = 0; i < n; i++) {
+        await Animals.create({ name: name + "-" + i, breedId: breeds[name].id }).exec();
+      }
+    }
+    const page = (q) => q.onetomany("Animals", "breed", "animals").orderBy("Breeds.name");
+    const first = await page(Breeds.find()).limit(2).exec();
+    assert.deepStrictEqual(
+      first.map((b) => [b.name, b.animals.length]),
+      [
+        ["B1", 3],
+        ["B2", 1],
+      ],
+    );
+    const second = await page(Breeds.find()).limit(2).offset(2).exec();
+    assert.deepStrictEqual(
+      second.map((b) => [b.name, b.animals.length]),
+      [["B3", 2]],
+    );
+    assert.deepStrictEqual(await page(Breeds.find()).limit(2).offset(3).exec(), []);
+    // findone() avec onetomany() garde tous les enfants
+    const b1 = await Breeds.findone({ name: "B1" }).onetomany("Animals", "breed", "animals").exec();
+    assert.strictEqual(b1.animals.length, 3);
+    // populate() + limit()
+    const animals = await Animals.find().populate("breed").orderBy("Animals.name").limit(2).exec();
+    assert.deepStrictEqual(
+      animals.map((a) => a.breed.name),
+      ["B1", "B1"],
+    );
+    // after
+    await truncateAll();
+  });
+
+  await test("createMany() : lignes, ordre, hooks, populate", async () => {
+    const { breed } = await createDogs();
+    const created = await Animals.createMany([
+      { name: "Rex", breedId: breed.id, legs: 4 },
+      { name: "toto", breedId: breed.id }, // beforeCreate : "toto" → "toto not allowed"
+      { name: "Jazz", breedId: breed.id, infos: { a: 1 } },
+    ])
+      .populate("breed")
+      .exec();
+    assert.deepStrictEqual(
+      created.map((a) => a.name),
+      ["Rex", "toto not allowed", "Jazz"],
+    );
+    assert.strictEqual(new Set(created.map((a) => a.id)).size, 3);
+    assert.strictEqual(created[0].legs, 4);
+    assert.strictEqual(created[1].legs, 2); // valeur par défaut
+    assert.deepStrictEqual(created[2].infos, { a: 1 });
+    assert.strictEqual(created[0].breed.name, "Labrador");
+    const ids = await Animals.createMany([{ name: "Felix", breedId: breed.id }])
+      .returnRow(false)
+      .exec();
+    assert.strictEqual(ids.length, 1);
+    assert.strictEqual(typeof ids[0], "number");
+    assert.deepStrictEqual(await Animals.createMany([]).exec(), []);
+    assert.strictEqual(await Animals.count().exec(), 4);
+    // after
+    await truncateAll();
+  });
+
+  await test("createMany() : tout ou rien", async () => {
+    const { breed } = await createDogs();
+    await assert.rejects(
+      Animals.createMany([
+        { name: "Rex", breedId: breed.id },
+        { name: "R", breedId: breed.id }, // validator : trop court
+      ]).exec(),
+      { code: "E_VALIDATION" },
+    );
+    assert.strictEqual(await Animals.count().exec(), 0);
+    // dans une transaction annulée
+    await assert.rejects(
+      MorphineDb.transaction(async () => {
+        await Animals.createMany([{ name: "Rex", breedId: breed.id }]).exec();
+        throw new Error("annule");
+      }),
+    );
+    assert.strictEqual(await Animals.count().exec(), 0);
+    // after
+    await truncateAll();
+  });
+
+  await test("createMany() : plusieurs milliers de lignes, par paquets", async () => {
+    const { breed } = await createDogs();
+    const rows = Array.from({ length: 4000 }, (_, i) => ({
+      name: "Chien " + i,
+      breedId: breed.id,
+      legs: i,
+    }));
+    const created = await Animals.createMany(rows).exec();
+    assert.strictEqual(created.length, 4000);
+    assert.ok(created.every((a, i) => a.legs === i && a.name === "Chien " + i));
+    assert.strictEqual(new Set(created.map((a) => a.id)).size, 4000);
+    assert.strictEqual(await Animals.count().exec(), 4000);
+    // after
+    await MorphineDb.query("DELETE FROM " + Animals.def.tableName + " WHERE legs >= 0");
+    await truncateAll();
+  });
+
+  await test("sum(), avg(), min(), max()", async () => {
+    const { breed } = await createDogs();
+    for (const [legs, birth] of [
+      [2, "2020-05-01"],
+      [4, "2018-01-01"],
+      [6, "2022-12-31"],
+    ]) {
+      await Animals.create({ name: "Chien", breedId: breed.id, legs, birth }).exec();
+    }
+    assert.strictEqual(await Animals.sum("legs").exec(), 12);
+    assert.strictEqual(await Animals.avg("legs").exec(), 4);
+    assert.strictEqual(await Animals.min("legs").exec(), 2);
+    assert.strictEqual(await Animals.max("Animals.legs").exec(), 6);
+    assert.strictEqual(await Animals.sum("legs", "Animals.legs > ?", [2]).exec(), 10);
+    assert.strictEqual(
+      await Animals.max("legs", "breed.name=?", ["Labrador"]).populate("breed").exec(),
+      6,
+    );
+    assert.strictEqual(await Animals.min("birth").exec(), "2018-01-01");
+    assert.strictEqual(await Animals.max("birth").exec(), "2022-12-31");
+    // aucune ligne : null
+    assert.strictEqual(await Animals.sum("legs", { name: "Personne" }).exec(), null);
+    assert.strictEqual(await Animals.avg("legs", { name: "Personne" }).exec(), null);
+    assert.throws(() => Animals.sum("legs) FROM x; --"), { code: "E_INVALID_WHERE" });
+    // after
+    await truncateAll();
+  });
+
+  await test("Index uniques, index composites et contraintes CHECK", async () => {
+    await withTempModels(
+      {
+        Members: `{
+          attributes: {
+            id: { type: "integer", autoincrement: true, primary: true },
+            email: { type: "string", defaultsTo: "", unique: true },
+            firstname: { type: "string", defaultsTo: "" },
+            lastname: { type: "string", defaultsTo: "" },
+            age: { type: "integer", defaultsTo: 0 },
+          },
+          indexes: [
+            { fields: ["lastname", "firstname"] },
+            { fields: ["firstname", "age"], unique: true, name: "members_firstname_age_u" },
+          ],
+          checks: { age_positive: "age >= 0" },
+        }`,
+      },
+      async () => {
+        const { Members } = Models;
+        const indexes = await MorphineDb._existingIndexes(Members.def);
+        const find = (cols, unique) =>
+          indexes.find(
+            (i) => i.columns.map((c) => c.toLowerCase()).join(",") === cols && i.unique === unique,
+          );
+        assert.ok(find("email", true), "index unique sur email");
+        assert.ok(find("lastname,firstname", false), "index composite");
+        assert.ok(find("firstname,age", true), "index composite unique");
+        await Members.create({
+          email: "a@x.fr",
+          firstname: "Ana",
+          lastname: "Diaz",
+          age: 30,
+        }).exec();
+        await assert.rejects(Members.create({ email: "a@x.fr", firstname: "Bob" }).exec());
+        await assert.rejects(Members.create({ email: "b@x.fr", firstname: "Ana", age: 30 }).exec());
+        await assert.rejects(Members.create({ email: "c@x.fr", age: -1 }).exec()); // CHECK
+        assert.strictEqual(await Members.count().exec(), 1);
+        // un second chargement ne recrée rien (un dossier vide resynchronise les modèles chargés)
+        const logs = await captureWarnings(async () => {
+          MorphineDb.config.quietMigration = false;
+          try {
+            await loadModels(path.join(os.tmpdir(), "morphine-dossier-vide"));
+          } finally {
+            MorphineDb.config.quietMigration = true;
+          }
+        });
+        assert.ok(!/ADD (UNIQUE )?INDEX|CREATE (UNIQUE )?INDEX|ADD CONSTRAINT/.test(logs), logs);
+      },
+    );
+  });
+
+  await test(
+    "Index et CHECK ajoutés à une table existante, sans toucher aux données",
+    { skip: DB_TYPE === "sqlite3" && "SQLite : pas de contrainte ajoutée après coup" },
+    async () => {
+      const model = (withConstraints) => `{
+        attributes: {
+          id: { type: "integer", autoincrement: true, primary: true },
+          email: { type: "string", defaultsTo: ""${withConstraints ? ", unique: true" : ""} },
+          age: { type: "integer", defaultsTo: 0 },
+        },
+        ${withConstraints ? 'checks: { age_positive: "age >= 0" },' : ""}
+      }`;
+      await withTempModels({ Visitors: model(false) }, async () => {
+        const { Visitors } = Models;
+        await Visitors.create({ email: "a@x.fr", age: 1 }).exec();
+        await Visitors.create({ email: "a@x.fr", age: -5 }).exec(); // doublon et âge négatif
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "morphine-models-"));
+        fs.writeFileSync(
+          path.join(dir, "Visitors.model.js"),
+          "module.exports = () => (" + model(true) + ");",
+        );
+        try {
+          const logs = await captureWarnings(() => loadModels(dir));
+          assert.match(logs, /index unique \S+ \(email\) non créé/);
+          assert.match(logs, /contrainte \S+ non créée/);
+          assert.strictEqual(await Models.Visitors.count().exec(), 2); // données intactes
+          // données corrigées : index et contrainte sont créés au chargement suivant
+          await Models.Visitors.updateone({ age: -5 }, { email: "b@x.fr", age: 5 }).exec();
+          const logs2 = await captureWarnings(() => loadModels(dir));
+          assert.ok(!/non créé/.test(logs2), logs2);
+          await assert.rejects(Models.Visitors.create({ email: "a@x.fr" }).exec());
+          await assert.rejects(Models.Visitors.create({ email: "z@x.fr", age: -1 }).exec());
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      });
+    },
+  );
+
+  await test("defaultsTo calculé et onUpdate", async () => {
+    await withTempModels(
+      {
+        Articles: `{
+          attributes: {
+            id: { type: "integer", autoincrement: true, primary: true },
+            code: { type: "string", defaultsTo: () => require("crypto").randomUUID() },
+            title: { type: "string", defaultsTo: "" },
+            slug: { type: "string", defaultsTo: (data) => String(data.title).toLowerCase().split(" ").join("-") },
+            editedBy: { type: "string", defaultsTo: "", onUpdate: () => "system" },
+          },
+        }`,
+      },
+      async () => {
+        const { Articles } = Models;
+        const a = await Articles.create({ title: "Hello World" }).exec();
+        const b = await Articles.create({ title: "Other", code: "fixed" }).exec();
+        assert.match(a.code, /^[0-9a-f-]{36}$/);
+        assert.strictEqual(a.slug, "hello-world");
+        assert.strictEqual(b.code, "fixed"); // fourni : gardé
+        assert.strictEqual(a.editedBy, ""); // onUpdate ne joue pas à la création
+        const many = await Articles.createMany([{ title: "X" }, { title: "Y" }]).exec();
+        assert.notStrictEqual(many[0].code, many[1].code);
+        const edited = await Articles.updateone(a.id, { title: "Changed" }).exec();
+        assert.strictEqual(edited.editedBy, "system");
+        assert.strictEqual(edited.slug, "hello-world"); // defaultsTo ne joue pas à la modification
+        const kept = await Articles.updateone(a.id, { editedBy: "ana" }).exec();
+        assert.strictEqual(kept.editedBy, "ana");
+        assert.match(Articles.createEmpty().code, /^[0-9a-f-]{36}$/);
+        assert.strictEqual(Articles.getAttributes().code.defaultsTo, undefined); // pas de DEFAULT en base
+      },
+    );
+  });
+
+  await test("enum : valeurs, défaut, validation, base", async () => {
+    await withTempModels(
+      {
+        Shirts: `{
+          attributes: {
+            id: { type: "integer", autoincrement: true, primary: true },
+            size: { type: "enum", values: ["S", "M", "L"], defaultsTo: "M" },
+            color: { type: "enum", values: ["red", "blue", "l'orange"] },
+          },
+        }`,
+      },
+      async () => {
+        const { Shirts } = Models;
+        const s = await Shirts.create({}).exec();
+        assert.strictEqual(s.size, "M");
+        assert.strictEqual(s.color, "red"); // sans défaut : la première valeur
+        assert.strictEqual((await Shirts.create({ color: "l'orange" }).exec()).color, "l'orange");
+        await assert.rejects(Shirts.create({ size: "XL" }).exec(), (err) => {
+          assert.strictEqual(err.code, "E_VALIDATION");
+          assert.deepStrictEqual(err.errors[0], {
+            field: "size",
+            error: "enum",
+            args: ["S", "M", "L"],
+          });
+          return true;
+        });
+        assert.strictEqual(Shirts.createEmpty().color, "red");
+        if (DB_TYPE !== "mysql2") {
+          // la base refuse aussi (CHECK) une valeur écrite sans passer par l'ORM
+          await assert.rejects(
+            MorphineDb.query(
+              "INSERT INTO Shirts (size, color, createdAt, updatedAt) VALUES ('XL', 'red', '2020-01-01', '2020-01-01')",
+            ),
+          );
+        }
+      },
+    );
+  });
+
+  await test(
+    "enum : une valeur ajoutée est prise en compte par la migration",
+    { skip: DB_TYPE === "sqlite3" && "SQLite : pas de contrainte modifiée après coup" },
+    async () => {
+      const model = (values) => `{ attributes: {
+        id: { type: "integer", autoincrement: true, primary: true },
+        size: { type: "enum", values: ${JSON.stringify(values)} },
+      } }`;
+      await withTempModels({ Hats: model(["S", "M"]) }, async () => {
+        await Models.Hats.create({ size: "S" }).exec();
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "morphine-models-"));
+        fs.writeFileSync(
+          path.join(dir, "Hats.model.js"),
+          "module.exports = () => (" + model(["S", "M", "XL"]) + ");",
+        );
+        try {
+          await loadModels(dir);
+          const xl = await Models.Hats.create({ size: "XL" }).exec();
+          assert.strictEqual(xl.size, "XL");
+          assert.strictEqual((await Models.Hats.findone({ size: "S" }).exec()).size, "S");
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      });
+    },
+  );
+
+  await test("enum sans values : erreur au chargement", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "morphine-models-"));
+    fs.writeFileSync(
+      path.join(dir, "Broken.model.js"),
+      'module.exports = () => ({ attributes: { id: { type: "integer", autoincrement: true, primary: true }, size: { type: "enum" } } });',
+    );
+    try {
+      await assert.rejects(loadModels(dir), /un enum attend values/);
+    } finally {
+      delete Models.Broken;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await test("Hooks afterCreate(), afterUpdate(), afterDestroy()", async () => {
+    const calls = [];
+    Species.def.afterCreate = async function (row, data) {
+      calls.push(["create", row.id, row.name, data.name, this === Species]);
+    };
+    Species.def.afterUpdate = async (result, data) =>
+      calls.push(["update", result.name, data.name]);
+    Species.def.afterDestroy = async (count, where) => calls.push(["destroy", count, where]);
+    try {
+      const dog = await Species.create({ name: "Dog" }).exec();
+      await Species.updateone(dog.id, { name: "Dog 2" }).exec();
+      await Species.destroy(dog.id).exec();
+      await Species.createMany([{ name: "A" }, { name: "B" }]).exec();
+      assert.deepStrictEqual(calls.slice(0, 3), [
+        ["create", dog.id, "Dog", "Dog", true],
+        ["update", "Dog 2", "Dog 2"],
+        ["destroy", 1, dog.id],
+      ]);
+      assert.deepStrictEqual(
+        calls.slice(3).map((c) => c[2]),
+        ["A", "B"],
+      );
+      // dans une transaction, les écritures d'un hook sont annulées avec elle
+      Species.def.afterCreate = async (row) => {
+        if (row.name === "Parent") await Species.create({ name: "Écrite par le hook" }).exec();
+      };
+      const before = await Species.count().exec();
+      await assert.rejects(
+        MorphineDb.transaction(async () => {
+          await Species.create({ name: "Parent" }).exec();
+          assert.strictEqual(await Species.count().exec(), before + 2);
+          throw new Error("annule");
+        }),
+      );
+      assert.strictEqual(await Species.count().exec(), before);
+    } finally {
+      delete Species.def.afterCreate;
+      delete Species.def.afterUpdate;
+      delete Species.def.afterDestroy;
+    }
+    // after
+    await truncateAll();
+  });
+
   await test("Test migrate alter : colonne supprimée puis rétablie", async () => {
     await MorphineDb.query(`ALTER TABLE ${Animals.def.tableName} DROP COLUMN legs`);
     await loadModels();

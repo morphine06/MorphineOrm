@@ -21,12 +21,30 @@ class MorphineTable {
       insertableFields: [],
       notNullFields: new Set(),
       validatableFields: [],
+      defaultFnFields: [],
+      onUpdateFields: [],
+      enumFields: [],
       modelFields: [],
       modelLookup: {},
     };
     for (const [fieldName, field] of attributesEntries) {
       field.fieldName = fieldName;
       meta.attributeNames.push(fieldName);
+      // defaultsTo: (data) => … est calculé à chaque création, jamais écrit dans
+      // la définition de la table
+      if (typeof field.defaultsTo === "function") {
+        field.defaultFn = field.defaultsTo;
+        delete field.defaultsTo;
+      }
+      if (field.defaultFn) meta.defaultFnFields.push(fieldName);
+      // onUpdate: (data) => … ; une chaîne reste la règle d'une clé étrangère
+      if (typeof field.onUpdate === "function") meta.onUpdateFields.push(fieldName);
+      if (field.type === "enum") {
+        if (!Array.isArray(field.values) || !field.values.length) {
+          throw new Error(`${def.modelname}.${fieldName} : un enum attend values: [...]`);
+        }
+        meta.enumFields.push(fieldName);
+      }
       if (field.primary) {
         this.primary = fieldName;
         // this.primaryType = field.type;
@@ -84,7 +102,9 @@ class MorphineTable {
         if (typejs == "number") row[fieldName] = 0;
         if (typejs == "date") row[fieldName] = null;
         if (typejs == "boolean") row[fieldName] = false;
+        if (field.type == "enum") row[fieldName] = field.values[0];
         if (field.defaultsTo) row[fieldName] = field.defaultsTo;
+        if (field.defaultFn) row[fieldName] = field.defaultFn({});
       }
     }
     return row;
@@ -104,6 +124,21 @@ class MorphineTable {
   count(where, whereData) {
     let exec = new MorphineTableExec(this);
     return exec.count(where, whereData);
+  }
+  sum(column, where, whereData) {
+    return new MorphineTableExec(this).aggregateOf("SUM", column, where, whereData);
+  }
+  avg(column, where, whereData) {
+    return new MorphineTableExec(this).aggregateOf("AVG", column, where, whereData);
+  }
+  min(column, where, whereData) {
+    return new MorphineTableExec(this).aggregateOf("MIN", column, where, whereData);
+  }
+  max(column, where, whereData) {
+    return new MorphineTableExec(this).aggregateOf("MAX", column, where, whereData);
+  }
+  createMany(rows) {
+    return new MorphineTableExec(this).createMany(rows);
   }
   findone(where, whereData) {
     let exec = new MorphineTableExec(this);

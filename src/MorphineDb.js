@@ -2,6 +2,15 @@ const path = require("path");
 const clc = require("cli-color");
 const fs = require("fs");
 const { AsyncLocalStorage } = require("node:async_hooks");
+const crypto = require("crypto");
+
+// Nom d'index ou de contrainte inséré dans le SQL
+const SAFE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// Littéral SQL : 'valeur' avec les apostrophes doublées
+function quoteLiteral(v) {
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
 const MorphineTable = require("./MorphineTable.js");
 // const { Config } = require("./Config.js");
 
@@ -153,7 +162,7 @@ const MorphineDb = new (class {
       new Promise((resolve, reject) => {
         // Une lecture rend ses lignes (all) ; une écriture rend, comme mysql2,
         // { affectedRows, insertId } (run), que all() ne fournit pas.
-        if (/^\s*(SELECT|PRAGMA|WITH)\b/i.test(sql)) {
+        if (/^\s*(SELECT|PRAGMA|WITH)\b/i.test(sql) || /\bRETURNING\b/i.test(sql)) {
           db.all(sql, sqlData, (err, rows) => (err ? reject(err) : resolve(rows)));
         } else {
           db.run(sql, sqlData, function (err) {
@@ -368,9 +377,18 @@ const MorphineDb = new (class {
         await cleanAndRelease(conn);
       }
     };
-    await this._checkConnection(pool, () => pool.query("SELECT 1"));
+    let version = "";
+    await this._checkConnection(pool, async () => {
+      version = (await pool.query("SELECT VERSION() AS v"))[0][0].v;
+    });
+    // MariaDB 10.5+ connaît INSERT … RETURNING (createMany en une requête)
+    const maria = /^(\d+)\.(\d+).*mariadb/i.exec(version);
+    const supportsReturning = Boolean(
+      maria && (+maria[1] > 10 || (+maria[1] == 10 && +maria[2] >= 5)),
+    );
     return {
       pool,
+      supportsReturning,
       catchError: this.config.catchError,
       query: makeQuery(this, run(pool)),
       rawQuery: makeQuery(this, rawRun, { raw: true }),
@@ -446,7 +464,12 @@ const MorphineDb = new (class {
     const tx = await this.connection.begin();
     const store = {
       done: false,
-      connection: { query: tx.query, rawQuery: tx.rawQuery, catchError: true },
+      connection: {
+        query: tx.query,
+        rawQuery: tx.rawQuery,
+        catchError: true,
+        supportsReturning: this.connection.supportsReturning,
+      },
       api: { query: (sql, sqlData = []) => tx.rawQuery(sql, sqlData) },
     };
     let result;
@@ -649,6 +672,8 @@ const MorphineDb = new (class {
         ? this.config.collation
         : "utf8mb4_general_ci";
     const charset = collation.split("_")[0];
+    for (const spec of this._checkSpecs(def))
+      what.push(`CONSTRAINT ${spec.name} CHECK (${spec.expr})`);
     let q = `CREATE TABLE IF NOT EXISTS ${def.tableName} (${what.join(", ")})`;
     // ENGINE, CHARSET et COLLATE n'existent qu'en MySQL / MariaDB.
     if (this.config.type == "mysql2")
@@ -967,58 +992,237 @@ const MorphineDb = new (class {
     }
   }
 
-  async updateIndexes(def) {
-    let rows2;
-    if (this.config.type == "sqlite3")
-      rows2 = await this.connection.query(
-        `SELECT * from sqlite_master WHERE type='index' AND tbl_name='${def.tableName}'`,
-      );
-    else if (this.config.type == "pg")
-      rows2 = await this.connection.query(
-        `SELECT * FROM pg_indexes WHERE tablename='${def.tableName.toLowerCase()}'`,
-      );
-    else rows2 = await this.connection.query(`SHOW INDEX FROM ${def.tableName}`);
+  // Index voulus par le modèle :
+  // - index: true et les clés étrangères (index simple, comme avant) ;
+  // - unique: true sur un attribut ;
+  // - indexes: [{ fields: ["a", "b"], unique: true, name: "…" }] au niveau du modèle.
+  _indexSpecs(def) {
+    const t = def.tableName;
+    const specs = [];
     for (const [fieldName, field] of Object.entries(def.attributes)) {
-      if (this._isUnresolvedLink(field)) continue;
-      let createIndex = false;
-      //let createUnique = false;
-      if (field.model || field.index) {
-        createIndex = true;
-        for (let iRows = 0; iRows < rows2.length; iRows++) {
-          const row2 = rows2[iRows];
-          if (this.config.type == "sqlite3" && row2.name == `${def.tableName}_${fieldName}_idx`)
-            createIndex = false;
-          else if (
-            this.config.type == "pg" &&
-            row2.indexname == `${def.tableName}_${fieldName}_idx`.toLowerCase()
-          )
-            createIndex = false;
-          else if (row2.Column_name == fieldName) createIndex = false;
+      if (this._isUnresolvedLink(field) || field.primary) continue;
+      if (field.unique) {
+        specs.push({
+          fields: [fieldName],
+          unique: true,
+          name: this._objectName(t, fieldName, "uniq"),
+        });
+      } else if (field.model || field.index) {
+        specs.push({
+          fields: [fieldName],
+          unique: false,
+          name: `${t}_${fieldName}_idx`,
+          simple: true,
+        });
+      }
+    }
+    for (const idx of def.indexes || []) {
+      const fields = idx.fields || [];
+      const unknown = fields.filter(
+        (f) => !Object.prototype.hasOwnProperty.call(def.attributes, f),
+      );
+      if (!fields.length || unknown.length) {
+        console.warn(
+          clc.red(
+            `@Warning - ${def.modelname}.indexes : attribut(s) inconnu(s) ${unknown.join(", ") || "(aucun champ)"}, index ignoré`,
+          ),
+        );
+        continue;
+      }
+      const name = idx.name || this._objectName(t, fields.join("_"), idx.unique ? "uniq" : "idx");
+      if (!SAFE_NAME.test(name)) {
+        console.warn(
+          clc.red(`@Warning - ${def.modelname}.indexes : nom d'index invalide "${name}", ignoré`),
+        );
+        continue;
+      }
+      specs.push({ fields, unique: Boolean(idx.unique), name });
+    }
+    return specs;
+  }
+
+  // Nom d'index ou de contrainte : MySQL et PostgreSQL limitent à 64 et 63
+  // caractères ; au-delà, une empreinte remplace le milieu.
+  _objectName(table, middle, suffix) {
+    const name = `${table}_${middle}_${suffix}`;
+    if (name.length <= 60) return name;
+    const hash = crypto.createHash("sha1").update(name).digest("hex").slice(0, 8);
+    return `${table.slice(0, 40)}_${hash}_${suffix}`;
+  }
+
+  // Index existants : [{ name, unique, columns: [...] }], colonnes dans l'ordre.
+  async _existingIndexes(def) {
+    const t = def.tableName;
+    if (this.config.type == "sqlite3") {
+      const list = (await this.connection.query(`PRAGMA index_list(${t})`)) || [];
+      const res = [];
+      for (const idx of list) {
+        const cols = (await this.connection.query(`PRAGMA index_info(${idx.name})`)) || [];
+        res.push({
+          name: idx.name,
+          unique: idx.unique == 1,
+          columns: cols.sort((a, b) => a.seqno - b.seqno).map((c) => c.name),
+        });
+      }
+      return res;
+    }
+    if (this.config.type == "pg") {
+      const rows =
+        (await this.connection.query(
+          `SELECT i.relname AS name, ix.indisunique AS uniq, array_agg(a.attname::text ORDER BY k.ord) AS cols
+          FROM pg_index ix
+          JOIN pg_class tb ON tb.oid = ix.indrelid
+          JOIN pg_namespace n ON n.oid = tb.relnamespace
+          JOIN pg_class i ON i.oid = ix.indexrelid
+          CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = tb.oid AND a.attnum = k.attnum
+          WHERE tb.relname = ? AND n.nspname = current_schema()
+          GROUP BY i.relname, ix.indisunique`,
+          [t.toLowerCase()],
+        )) || [];
+      return rows.map((r) => ({ name: r.name, unique: r.uniq, columns: r.cols }));
+    }
+    const rows = (await this.connection.query(`SHOW INDEX FROM ${t}`)) || [];
+    const byName = {};
+    for (const r of rows) {
+      byName[r.Key_name] ??= { name: r.Key_name, unique: r.Non_unique == 0, columns: [] };
+      byName[r.Key_name].columns[r.Seq_in_index - 1] = r.Column_name;
+    }
+    return Object.values(byName);
+  }
+
+  // Exécute une requête de migration qui peut échouer à cause des données
+  // (doublons, lignes qui violent une contrainte) : un avertissement, et la
+  // synchronisation continue. Les données ne sont jamais modifiées.
+  async _tryMigration(q, warning) {
+    this._logMigration(q);
+    let ok;
+    try {
+      ok = (await this.connection.query(q)) !== null;
+    } catch {
+      ok = false;
+    }
+    if (!ok) console.warn(clc.red(`@Warning - ${warning}`));
+    return ok;
+  }
+
+  async updateIndexes(def) {
+    const t = def.tableName;
+    const existing = await this._existingIndexes(def);
+    const lower = (a) => a.map((c) => String(c).toLowerCase());
+    const same = (a, b) => a.length == b.length && lower(a).every((c, i) => c == lower(b)[i]);
+    const startsWith = (cols, fields) => same(cols.slice(0, fields.length), fields);
+    for (const spec of this._indexSpecs(def)) {
+      const satisfied = existing.some((idx) => {
+        if (String(idx.name).toLowerCase() == spec.name.toLowerCase()) return true;
+        // index simple : comme avant, tout index qui contient la colonne convient
+        if (spec.simple) return lower(idx.columns).includes(spec.fields[0].toLowerCase());
+        if (spec.unique) return idx.unique && same(idx.columns, spec.fields);
+        return startsWith(idx.columns, spec.fields);
+      });
+      if (satisfied) continue;
+      const cols = spec.fields.join(", ");
+      const unique = spec.unique ? "UNIQUE " : "";
+      let q;
+      if (this.config.type == "mysql2") {
+        q = spec.simple
+          ? `ALTER TABLE ${t} ADD INDEX (${cols})`
+          : `ALTER TABLE ${t} ADD ${unique}INDEX ${spec.name} (${cols})`;
+      } else {
+        q = `CREATE ${unique}INDEX IF NOT EXISTS ${spec.name} ON ${t} (${cols})`;
+      }
+      await this._tryMigration(
+        q,
+        spec.unique
+          ? `${def.modelname} : index unique ${spec.name} (${cols}) non créé, la table contient sans doute des doublons`
+          : `${def.modelname} : index ${spec.name} (${cols}) non créé`,
+      );
+    }
+  }
+
+  // Contraintes CHECK voulues : checks: { nom: "expression SQL" } du modèle, et
+  // sous PostgreSQL et SQLite la liste des valeurs d'un enum (MySQL a son type ENUM).
+  _checkSpecs(def) {
+    const t = def.tableName;
+    const specs = [];
+    for (const [key, expr] of Object.entries(def.checks || {})) {
+      if (!SAFE_NAME.test(key) || typeof expr !== "string" || !expr.trim()) {
+        console.warn(
+          clc.red(`@Warning - ${def.modelname}.checks.${key} : nom ou expression invalide, ignoré`),
+        );
+        continue;
+      }
+      specs.push({ name: this._objectName(t, key, "chk"), expr });
+    }
+    if (this.config.type != "mysql2") {
+      for (const [fieldName, field] of Object.entries(def.attributes)) {
+        if (field.type != "enum") continue;
+        const list = field.values.map((v) => quoteLiteral(v)).join(", ");
+        // l'empreinte des valeurs dans le nom : une liste modifiée donne une autre contrainte
+        const hash = crypto.createHash("sha1").update(list).digest("hex").slice(0, 8);
+        specs.push({
+          name: this._objectName(t, `${fieldName}_enum_${hash}`, "chk"),
+          prefix: this._objectName(t, `${fieldName}_enum`, "").replace(/_$/, ""),
+          expr: `${fieldName} IN (${list})`,
+          enum: true,
+        });
+      }
+    }
+    return specs;
+  }
+
+  async _existingChecks(def) {
+    const t = def.tableName;
+    if (this.config.type == "sqlite3") {
+      const rows =
+        (await this.connection.query(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+          [t],
+        )) || [];
+      const sql = rows.length ? rows[0].sql : "";
+      return [...sql.matchAll(/CONSTRAINT\s+(\w+)\s+CHECK/gi)].map((m) => m[1]);
+    }
+    const q =
+      this.config.type == "pg"
+        ? `SELECT c.conname AS name FROM pg_constraint c JOIN pg_class tb ON tb.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = tb.relnamespace
+           WHERE c.contype = 'c' AND tb.relname = ? AND n.nspname = current_schema()`
+        : `SELECT CONSTRAINT_NAME AS name FROM information_schema.TABLE_CONSTRAINTS
+           WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_TYPE = 'CHECK'`;
+    const rows =
+      (await this.connection.query(q, [this.config.type == "pg" ? t.toLowerCase() : t])) || [];
+    return rows.map((r) => r.name);
+  }
+
+  // Ajoute les CHECK manquants d'une table existante ; remplace ceux d'un enum
+  // dont la liste a changé. Les autres ne sont jamais supprimés.
+  async _syncChecks(def) {
+    const specs = this._checkSpecs(def);
+    if (!specs.length) return;
+    const t = def.tableName;
+    const existing = (await this._existingChecks(def)).map((n) => String(n).toLowerCase());
+    for (const spec of specs) {
+      if (existing.includes(spec.name.toLowerCase())) continue;
+      if (this.config.type == "sqlite3") {
+        console.warn(
+          clc.red(
+            `@Warning - ${def.modelname} : SQLite ne peut pas ajouter la contrainte ${spec.name} à une table existante`,
+          ),
+        );
+        continue;
+      }
+      if (spec.enum) {
+        for (const old of existing.filter((n) => n.startsWith(spec.prefix.toLowerCase()))) {
+          await this._tryMigration(
+            `ALTER TABLE ${t} DROP CONSTRAINT ${old}`,
+            `${def.modelname} : contrainte ${old} non supprimée`,
+          );
         }
       }
-      // if (field.unique) {
-      // 	createUnique = true;
-      // 	for (let iRows = 0; iRows < rows2.length; iRows++) {
-      // 		const row2 = rows2[iRows];
-      // 		if (row2.Column_name == fieldName) createIndex = false;
-      // 	}
-      // }
-
-      if (createIndex) {
-        let q;
-        if (this.config.type == "sqlite3")
-          q = `CREATE INDEX ${def.tableName}_${fieldName}_idx ON ${def.tableName} (${fieldName})`;
-        else if (this.config.type == "pg")
-          q = `CREATE INDEX IF NOT EXISTS ${def.tableName}_${fieldName}_idx ON ${def.tableName} (${fieldName})`;
-        else q = `ALTER TABLE ${def.tableName} ADD INDEX (${fieldName})`;
-        this._logMigration(q);
-        await this.connection.query(q);
-      }
-      // if (createUnique) {
-      // 	let q = "ALTER TABLE " + def.tableName + " ADD UNIQUE (" + fieldName + ")";
-      // 	console.warn("q", q);
-      // 	await this.connection.query(q);
-      // }
+      await this._tryMigration(
+        `ALTER TABLE ${t} ADD CONSTRAINT ${spec.name} CHECK (${spec.expr})`,
+        `${def.modelname} : contrainte ${spec.name} non créée, des lignes ne la respectent sans doute pas`,
+      );
     }
   }
 
@@ -1048,7 +1252,10 @@ const MorphineDb = new (class {
 
     if (this.config.migrate == "alter" || this.config.migrate == "recreate") {
       if (!exists) await this.createTable(def);
-      else await this.updateTable(def);
+      else {
+        await this.updateTable(def);
+        await this._syncChecks(def);
+      }
       await this.updateIndexes(def);
     }
   }
@@ -1151,7 +1358,11 @@ const MorphineDb = new (class {
       res = "TEXT";
       typeJS = "string";
     } else if (ormtype == "enum") {
-      res = "ENUM";
+      // MySQL : vrai type ENUM ; PostgreSQL et SQLite : texte + CHECK (cf. _checkSpecs)
+      res =
+        this.config.type == "mysql2"
+          ? `ENUM(${(field.values || []).map((v) => quoteLiteral(v)).join(",")})`
+          : "TEXT";
       typeJS = "string";
     } else if (ormtype == "set") {
       res = "SET";

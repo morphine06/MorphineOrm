@@ -27,13 +27,26 @@ const SAFE_COLUMN = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
  * 0 puisque sql_mode est vidé à la connexion, mais l'intention était fausse et
  * PostgreSQL, lui, refuserait.
  */
-function defaultValueFor(field) {
+function defaultValueFor(field, data) {
+  // valeur calculée : defaultsTo: (data) => …
+  if (field.defaultFn) return field.defaultFn(data);
+  // un enum sans valeur par défaut prend sa première valeur, comme MySQL
+  if (field.type === "enum" && field.defaultsTo === undefined && Array.isArray(field.values)) {
+    return field.values[0];
+  }
   // Un booléen s'écrit 0 / 1 : PostgreSQL refuse `false` dans sa colonne SMALLINT.
   if (field.type === "boolean") {
     const v = field.defaultsTo;
     return v === true || v === "true" || v === 1 || v === "1" ? 1 : 0;
   }
   return field.defaultsTo ?? (NUMERIC_TYPES.has(field.type) || field.model ? 0 : "");
+}
+
+function checkCount(name, n) {
+  if (!Number.isSafeInteger(n) || n < 0) {
+    throw new TypeError(`${name}() attend un entier positif ou nul, reçu ${JSON.stringify(n)}`);
+  }
+  return n;
 }
 
 class MorphineTableExec {
@@ -61,6 +74,9 @@ class MorphineTableExec {
     this.logQuery = false;
     // this.catchErr = false;
     this.iscount = false;
+    this.aggregate = null; // { fn: "SUM" | "AVG" | "MIN" | "MAX", column }
+    this._limit = null;
+    this._offset = null;
     this.originalPopulate = [];
     // this.swallowerror = false;
     this.joinModels = [
@@ -84,8 +100,39 @@ class MorphineTableExec {
     this.iscount = true;
     return this.find(where, whereData);
   }
+  // sum("legs"), avg(…), min(…), max(…) : comme count(), une seule valeur
+  aggregateOf(fn, column, where, whereData) {
+    if (typeof column !== "string" || !SAFE_COLUMN.test(column)) {
+      const err = new Error(
+        `${this.modelname}.${fn.toLowerCase()}() : nom de colonne invalide : ${JSON.stringify(column)}`,
+      );
+      err.code = "E_INVALID_WHERE";
+      throw err;
+    }
+    this.aggregate = { fn, column: column.includes(".") ? column : `${this.modelname}.${column}` };
+    return this.find(where, whereData);
+  }
+  limit(n) {
+    this._limit = checkCount("limit", n);
+    return this;
+  }
+  offset(n) {
+    this._offset = checkCount("offset", n);
+    return this;
+  }
+  // Insère plusieurs lignes : en une requête par paquet (RETURNING), sinon une
+  // par ligne, toujours dans une seule transaction.
+  createMany(rows) {
+    if (!Array.isArray(rows))
+      throw new TypeError(`${this.modelname}.createMany() attend un tableau`);
+    this.onlyOne = false;
+    this.command = "INSERT_MANY";
+    this.dataList = rows;
+    return this;
+  }
   findone(where, whereData) {
     this.onlyOne = true;
+    this._implicitLimit = this._limit === null; // une ligne suffit (cf. exec)
     this.where = where;
     this.whereData = whereData === undefined ? [] : whereData;
     return this;
@@ -382,29 +429,74 @@ class MorphineTableExec {
     return res;
   }
 
+  _createLimit() {
+    if (this._limit === null && this._offset === null) return "";
+    const type = this.MorphineDb.config.type;
+    let res = "";
+    if (this._limit !== null) res = `LIMIT ${this._limit}`;
+    // OFFSET sans LIMIT : MySQL et SQLite exigent un LIMIT
+    else if (type === "mysql2") res = "LIMIT 18446744073709551615";
+    else if (type === "sqlite3") res = "LIMIT -1";
+    if (this._offset) res += ` OFFSET ${this._offset}`;
+    return res;
+  }
+
   _createSelectQuery() {
     // _createWhere() empile les valeurs dans whereData : un seul appel par requête.
-    const what = this.iscount
-      ? `count(${this.modelname}.${this.primary}) as cmpt`
-      : this._createSelect();
-    const tail = this.iscount ? "" : this._createOrder();
-    return `SELECT ${what} FROM ${this._createJoin()} WHERE ${this._createWhere()} ${tail}`;
+    const single = this.iscount || this.aggregate;
+    let what;
+    if (this.iscount) what = `count(${this.modelname}.${this.primary}) as cmpt`;
+    else if (this.aggregate) what = `${this.aggregate.fn}(${this.aggregate.column}) AS agg`;
+    else what = this._createSelect();
+    let where = this._createWhere();
+    // onetomany() paginé : les parents ont été choisis par une première requête
+    if (this._pageIds) {
+      where = `(${where}) AND ${this.modelname}.${this.primary} IN (${this._pageIds.map(() => "?").join(", ")})`;
+      this.whereData.push(...this._pageIds);
+    }
+    const tail = single
+      ? ""
+      : this._createOrder() + (this._pageIds ? "" : " " + this._createLimit());
+    return `SELECT ${what} FROM ${this._createJoin()} WHERE ${where} ${tail}`;
+  }
+
+  // Avec onetomany(), une ligne SQL par enfant : LIMIT compterait les enfants. On
+  // choisit donc d'abord les parents de la page, sans les jointures onetomany.
+  async _selectPageIds() {
+    const saved = { joinModels: this.joinModels, whereData: this.whereData };
+    this.joinModels = this.joinModels.filter((m) => !m.isOneToMany);
+    this.whereData = [...saved.whereData];
+    const where = this._createWhere();
+    const data = this.whereData;
+    const order = this.order ? `ORDER BY ${this.order}` : "";
+    const sql = `SELECT ${this.modelname}.${this.primary} AS pk FROM ${this._createJoin()} WHERE ${where} ${order} ${this._createLimit()}`;
+    this.joinModels = saved.joinModels;
+    this.whereData = saved.whereData;
+    const rows = (await this.connection.query(sql, data)) || [];
+    return rows.map((r) => r.pk);
+  }
+
+  // Valeurs de l'INSERT, dans l'ordre de meta.insertableFields.
+  _insertValues() {
+    const attrs = this.def.attributes;
+    const isPg = this.MorphineDb.config.type === "pg";
+    const values = [];
+    for (const fieldName of this._meta.insertableFields) {
+      if (Object.prototype.hasOwnProperty.call(this.data, fieldName)) {
+        values.push(this.data[fieldName]);
+      } else {
+        let v = defaultValueFor(attrs[fieldName], this.data);
+        // PostgreSQL refuse la date zéro : une date absente y vaut NULL.
+        if (isPg && typeof v === "string" && v.startsWith("0000-00-00")) v = null;
+        values.push(v);
+      }
+    }
+    return values;
   }
 
   async _createInsertQuery() {
     const meta = this._meta;
-    const attrs = this.def.attributes;
-    const isPg = this.MorphineDb.config.type === "pg";
-    for (const fieldName of meta.insertableFields) {
-      if (Object.prototype.hasOwnProperty.call(this.data, fieldName)) {
-        this.whereData.push(this.data[fieldName]);
-      } else {
-        let v = defaultValueFor(attrs[fieldName]);
-        // PostgreSQL refuse la date zéro : une date absente y vaut NULL.
-        if (isPg && typeof v === "string" && v.startsWith("0000-00-00")) v = null;
-        this.whereData.push(v);
-      }
-    }
+    this.whereData.push(...this._insertValues());
 
     let query = `INSERT INTO ${this.def.tableName} (${meta.insertFieldsList}) VALUES (${meta.insertPlaceholdersList})`;
     if (this.MorphineDb.config.type === "pg") {
@@ -596,7 +688,7 @@ class MorphineTableExec {
       if (!meta.notNullFields.has(fieldName)) continue;
       const v = data[fieldName];
       if (v !== null && v !== undefined) continue;
-      data[fieldName] = defaultValueFor(this.def.attributes[fieldName]);
+      data[fieldName] = defaultValueFor(this.def.attributes[fieldName], data);
     }
   }
 
@@ -757,6 +849,40 @@ class MorphineTableExec {
     }
     if (fn) await fn.call(this.data, this.data);
     else if (fn2) await fn2.call(this, this.where, this.whereData);
+    this._computedValues();
+  }
+
+  // defaultsTo: (data) => … à la création, onUpdate: (data) => … à chaque
+  // modification, pour les attributs que l'appelant (ou le hook) n'a pas fournis.
+  _computedValues() {
+    const meta = this._meta;
+    if (this.command === "INSERT") {
+      for (const fieldName of meta.defaultFnFields) {
+        const v = this.data[fieldName];
+        if (v === undefined || v === null) {
+          this.data[fieldName] = this.def.attributes[fieldName].defaultFn(this.data);
+        }
+      }
+    } else if (this.command === "UPDATE") {
+      for (const fieldName of meta.onUpdateFields) {
+        if (this.data[fieldName] === undefined) {
+          this.data[fieldName] = this.def.attributes[fieldName].onUpdate(this.data);
+        }
+      }
+    }
+  }
+
+  // Hooks after* : appelés une fois l'écriture faite, avec `this` = le modèle.
+  async _afterQuery(result) {
+    const def = this.def;
+    if (this.command === "INSERT" && def.afterCreate) {
+      const row = result && typeof result === "object" ? result : this.data;
+      await def.afterCreate.call(this.table, row, this.data);
+    } else if (this.command === "UPDATE" && def.afterUpdate) {
+      await def.afterUpdate.call(this.table, result, this.data);
+    } else if (this.command === "DELETE" && def.afterDestroy) {
+      await def.afterDestroy.call(this.table, result, this._whereBefore, this._whereDataBefore);
+    }
   }
   // Règles `validator: { fn, args }` des attributs, appliquées aux champs fournis.
   // fn est une fonction de la bibliothèque validator (isEmail, isLength…), qui
@@ -764,6 +890,16 @@ class MorphineTableExec {
   _validate() {
     const errors = [];
     const attrs = this.def.attributes;
+    for (const fieldName of this._meta.enumFields) {
+      const value = this.data[fieldName];
+      if (value === undefined || value === null) continue;
+      const { values } = attrs[fieldName];
+      if (!values.includes(value)) {
+        const error = { field: fieldName, error: "enum", args: values };
+        if (this.MorphineDb.config.logValues) error.value = value;
+        errors.push(error);
+      }
+    }
     for (const fieldName of this._meta.validatableFields) {
       const value = this.data[fieldName];
       if (value === undefined || value === null) continue;
@@ -796,6 +932,21 @@ class MorphineTableExec {
       throw new Error(
         `${this.modelname} : pas de connexion, MorphineDb.init() n'a pas été appelé ou close() l'a fermée`,
       );
+    }
+    if (this.command == "INSERT_MANY") return this._execInsertMany(returnCompleteRow);
+    // findone() : LIMIT 1, sauf avec onetomany(), dont les lignes SQL sont celles des
+    // enfants (l'orderBy() peut alors porter sur eux)
+    if (
+      this._implicitLimit &&
+      this._limit === null &&
+      !this.joinModels.some((m) => m.isOneToMany)
+    ) {
+      this._limit = 1;
+    }
+    if (this.command == "DELETE") {
+      // pour afterDestroy : la condition telle que l'appelant l'a donnée
+      this._whereBefore = this.where;
+      this._whereDataBefore = Array.isArray(this.whereData) ? [...this.whereData] : this.whereData;
     }
     if (this.command == "REPLACE") {
       let w = "1=0", // PostgreSQL refuse `WHERE 0`
@@ -847,6 +998,15 @@ class MorphineTableExec {
         query = this._createDropQuery();
         break;
       default:
+        if (
+          (this._limit !== null || this._offset !== null) &&
+          !this.iscount &&
+          !this.aggregate &&
+          this.joinModels.some((m) => m.isOneToMany)
+        ) {
+          this._pageIds = await this._selectPageIds();
+          if (!this._pageIds.length) return this.onlyOne ? null : [];
+        }
         query = this._createSelectQuery();
     }
 
@@ -868,9 +1028,91 @@ class MorphineTableExec {
       }
     }
     let data = await this.postTreatmentMain(rows, returnCompleteRow);
+    if (rows) await this._afterQuery(data);
     return data;
-    // }
   }
+
+  async _execInsertMany(returnCompleteRow) {
+    if (!this.dataList.length) return [];
+    return this.MorphineDb.transaction(async () => {
+      const connection = this.MorphineDb.currentConnection();
+      const db = this.MorphineDb;
+      // chaque ligne : hooks, valeurs calculées, validation, conversions
+      const subs = [];
+      for (const data of this.dataList) {
+        const sub = new MorphineTableExec(this.table).create({ ...data });
+        await sub._beforeQuery();
+        sub._throwIfInvalid();
+        sub._preTreatment();
+        subs.push(sub);
+      }
+      const auto = Boolean(this.table.primaryField && this.table.primaryField.autoincrement);
+      const returning = connection.supportsReturning || db.config.type !== "mysql2";
+      const cols = this._meta.insertFieldsList;
+      const one = `(${this._meta.insertPlaceholdersList})`;
+      if (auto && !returning) {
+        // MySQL sans RETURNING : insertId n'est sûr que ligne par ligne
+        for (const sub of subs) {
+          const res = await connection.query(
+            `INSERT INTO ${this.def.tableName} (${cols}) VALUES ${one}`,
+            sub._insertValues(),
+          );
+          sub.data[this.primary] = res.insertId;
+        }
+      } else {
+        // paquets : PostgreSQL accepte 65 535 valeurs par requête, SQLite 32 766
+        const perChunk = Math.max(1, Math.floor(30000 / this._meta.insertableFields.length));
+        for (let i = 0; i < subs.length; i += perChunk) {
+          const chunk = subs.slice(i, i + perChunk);
+          let sql = `INSERT INTO ${this.def.tableName} (${cols}) VALUES ${chunk.map(() => one).join(", ")}`;
+          if (auto) sql += ` RETURNING ${this.primary}`;
+          const res = await connection.query(
+            sql,
+            chunk.flatMap((s) => s._insertValues()),
+          );
+          if (auto) chunk.forEach((sub, j) => (sub.data[this.primary] = res[j][this.primary]));
+        }
+      }
+      const ids = subs.map((s) => s.data[this.primary]);
+      let result = ids;
+      if (returnCompleteRow) {
+        const find = this.table.find(
+          `${this.modelname}.${this.primary} IN (${ids.map(() => "?").join(", ")})`,
+          ids,
+        );
+        this.originalPopulate.forEach((p) => find.populate(p));
+        const rows = await find.exec();
+        const byId = new Map(rows.map((r) => [String(r[this.primary]), r]));
+        result = ids.map((id) => byId.get(String(id)));
+      }
+      if (this.def.afterCreate) {
+        for (let i = 0; i < subs.length; i++) {
+          await this.def.afterCreate.call(
+            this.table,
+            returnCompleteRow ? result[i] : subs[i].data,
+            subs[i].data,
+          );
+        }
+      }
+      return result;
+    });
+  }
+  // SUM et AVG rendent un nombre (MySQL et PostgreSQL les rendent en chaîne
+  // décimale) ; MIN et MAX gardent le type de la colonne. Aucune ligne : null.
+  _aggregateValue(v) {
+    if (v === null || v === undefined) return null;
+    const { fn, column } = this.aggregate;
+    if (fn === "SUM" || fn === "AVG") return Number(v);
+    const name = column.split(".").pop();
+    const field = this.def.attributes[name];
+    const numeric =
+      field &&
+      (NUMERIC_TYPES.has(field.type) ||
+        field.model ||
+        ["bigint", "decimal", "price"].includes(field.type));
+    return numeric && typeof v === "string" ? Number(v) : v;
+  }
+
   async postTreatmentMain(rows, returnCompleteRow) {
     let res;
     if (!rows) {
@@ -924,6 +1166,7 @@ class MorphineTableExec {
       default:
         if (this.iscount)
           res = Number(rows[0].cmpt); // PostgreSQL rend COUNT() en bigint, donc en chaîne
+        else if (this.aggregate) res = this._aggregateValue(rows[0].agg);
         else {
           rows = this._postTreatment(rows);
           if (this.onlyOne) {
