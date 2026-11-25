@@ -326,9 +326,7 @@ initApp().then(async () => {
   await test("Test getPrimary() and getAttributes()", async () => {
     // test
     let primary = Animals.getPrimary();
-    console.log("🚀 ~ awaittest ~ primary:", primary);
     let attributes = Animals.getAttributes();
-    console.log("🚀 ~ awaittest ~ attributes:", attributes);
     assert.strictEqual(primary, "id");
     assert.strictEqual(attributes.id.type, "integer");
     assert.strictEqual(attributes.name.type, "string");
@@ -345,7 +343,8 @@ initApp().then(async () => {
       legs: 4,
       birth: "2022-01-01",
     }).exec();
-    console.log("🚀 ~ awaittest ~ animalCharly:", animalCharly);
+    assert.strictEqual(animalCharly.legs, 4);
+    assert.strictEqual(animalCharly.birth, "2022-01-01");
     // after
     await truncateAll();
   });
@@ -835,6 +834,170 @@ initApp().then(async () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // Messages console.warn émis pendant fn().
+  async function captureWarnings(fn) {
+    const warn = console.warn;
+    const logged = [];
+    console.warn = (...args) =>
+      logged.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    try {
+      await fn();
+    } finally {
+      console.warn = warn;
+    }
+    return logged.join("\n");
+  }
+
+  await test("Sécurité : une clé de condition objet ne peut pas injecter de SQL", async () => {
+    await createDogs("Rex", "Jazz");
+    for (const key of [
+      "1=1 OR Animals.name",
+      "name) OR (1=1",
+      "name; DROP TABLE x",
+      "Animals.name--",
+      "",
+    ]) {
+      await assert.rejects(Animals.find({ [key]: "x" }).exec(), { code: "E_INVALID_WHERE" });
+      await assert.rejects(Animals.destroy({ [key]: "x" }).exec(), { code: "E_INVALID_WHERE" });
+      await assert.rejects(Animals.update({ [key]: "x" }, { legs: 9 }).exec(), {
+        code: "E_INVALID_WHERE",
+      });
+    }
+    // un tableau n'est pas une condition
+    await assert.rejects(Animals.find([1]).exec(), { code: "E_INVALID_WHERE" });
+    assert.strictEqual(await Animals.count().exec(), 2);
+    // les noms de colonne, préfixés ou non, restent acceptés
+    assert.strictEqual((await Animals.find({ name: "Rex" }).exec()).length, 1);
+    assert.strictEqual((await Animals.find({ "Animals.name": "Rex" }).exec()).length, 1);
+    // after
+    await truncateAll();
+  });
+
+  await test("Sécurité : une chaîne numérique est un identifiant, pas du SQL", async () => {
+    const {
+      animals: [rex, jazz, charly],
+    } = await createDogs("Rex", "Jazz", "Charly");
+    // " 1", "0x1", "1e0" valent 1 pour Number() mais `WHERE 0x1` est toujours vrai en SQL
+    const disguised = (id) => [` ${id}`, `${id} `, `0x${id.toString(16)}`, `${id}e0`, `+${id}`];
+    for (const id of disguised(rex.id)) {
+      assert.strictEqual((await Animals.findone(id).exec()).name, "Rex");
+      assert.strictEqual((await Animals.find(id).exec()).length, 1);
+    }
+    for (const id of disguised(jazz.id)) {
+      assert.strictEqual((await Animals.updateone(id, { legs: 3 }).exec()).name, "Jazz");
+    }
+    assert.strictEqual((await Animals.findone(rex.id).exec()).legs, 2);
+    assert.strictEqual(await Animals.destroy(`0x${charly.id.toString(16)}`).exec(), 1);
+    assert.strictEqual(await Animals.count().exec(), 2);
+    // after
+    await truncateAll();
+  });
+
+  await test("Sécurité : update() n'écrit que les attributs du modèle", async () => {
+    const {
+      animals: [rex],
+    } = await createDogs("Rex");
+    // clés héritées de Object.prototype, et __proto__ propre (JSON.parse d'un corps de requête)
+    const data = JSON.parse(
+      '{"__proto__": {"legs": 9}, "constructor": 1, "toString": 2, "legs": 3}',
+    );
+    const back = await Animals.updateone(rex.id, data).exec();
+    assert.strictEqual(back.legs, 3);
+    assert.strictEqual({}.legs, undefined); // pas de pollution de prototype
+    // after
+    await truncateAll();
+  });
+
+  await test("updateone() refuse une condition qui désigne plusieurs lignes", async () => {
+    await createDogs("Rex", "Jazz");
+    await assert.rejects(Animals.updateone({ legs: 2 }, { legs: 4 }).exec(), {
+      code: "E_UPDATEONE_MANY",
+    });
+    await assert.rejects(Animals.updateone("Animals.legs=?", [2], { legs: 4 }).exec(), {
+      code: "E_UPDATEONE_MANY",
+    });
+    assert.strictEqual((await Animals.find({ legs: 4 }).exec()).length, 0); // rien n'a été modifié
+    // une condition qui ne désigne qu'une ligne passe
+    const rex = await Animals.updateone({ name: "Rex" }, { legs: 4 }).exec();
+    assert.strictEqual(rex.legs, 4);
+    assert.strictEqual((await Animals.findone({ name: "Jazz" }).exec()).legs, 2);
+    // update() modifie toujours plusieurs lignes
+    assert.strictEqual(await Animals.update({ breedId: rex.breedId }, { legs: 1 }).exec(false), 2);
+    // after
+    await truncateAll();
+  });
+
+  await test("Logs : les valeurs des requêtes sont masquées, sauf logValues", async () => {
+    const secret = "motdepasse-tres-secret";
+    MorphineDb.connection.catchError = false;
+    try {
+      let logs = await captureWarnings(() =>
+        Animals.find("colonne_inexistante=?", [secret]).exec(),
+      );
+      assert.match(logs, /sql-error/);
+      assert.ok(!logs.includes(secret), "la valeur ne doit pas être journalisée");
+      MorphineDb.config.logValues = true;
+      logs = await captureWarnings(() => Animals.find("colonne_inexistante=?", [secret]).exec());
+      assert.ok(logs.includes(secret), "logValues réaffiche les valeurs");
+    } finally {
+      MorphineDb.config.logValues = false;
+      MorphineDb.connection.catchError = true;
+    }
+    // catchError: true : l'erreur levée ne recopie pas la requête avec ses valeurs
+    await captureWarnings(async () => {
+      await assert.rejects(Animals.find("colonne_inexistante=?", [secret]).exec(), (error) => {
+        assert.ok(!JSON.stringify({ ...error, message: error.message }).includes(secret));
+        return true;
+      });
+    });
+    // une erreur de validation ne contient pas la valeur refusée
+    await assert.rejects(Animals.create({ name: "x" }).exec(), (error) => {
+      assert.strictEqual(error.errors[0].value, undefined);
+      return true;
+    });
+  });
+
+  await test(
+    "Migration : les données orphelines ne sont pas modifiées, la clé étrangère attend",
+    { skip: DB_TYPE === "sqlite3" && "SQLite : pas de contrainte ajoutée après coup" },
+    async () => {
+      const table = Animals.def.tableName;
+      const fk = `${table}_${Breeds.def.tableName}_breedId_fk`;
+      const dropFk = () =>
+        MorphineDb.query(
+          DB_TYPE === "pg"
+            ? `ALTER TABLE ${table} DROP CONSTRAINT ${fk.toLowerCase()}`
+            : `ALTER TABLE ${table} DROP FOREIGN KEY ${fk}`,
+        );
+      const { breed } = await createDogs("Rex");
+      await dropFk();
+      // sans contrainte, une ligne peut pointer vers une race inexistante
+      const orphan = await Animals.create({ name: "Orphelin", breedId: 999999 }).exec();
+      const logs = await captureWarnings(() => loadModels());
+      assert.match(logs, /1 ligne\(s\) pointent vers un Breeds inexistant/);
+      assert.strictEqual((await Animals.findone(orphan.id).exec()).breedId, 999999); // intacte
+      // la contrainte n'a pas été créée : un autre orphelin passe encore
+      const orphan2 = await Animals.create({ name: "Orphelin 2", breedId: 888888 }).exec();
+      // une règle inconnue n'est jamais insérée dans le SQL
+      await Animals.destroy(orphan.id).exec();
+      await Animals.destroy(orphan2.id).exec();
+      const rule = Animals.def.attributes.breedId.onDelete;
+      Animals.def.attributes.breedId.onDelete = "CASCADE; DROP TABLE x";
+      try {
+        const bad = await captureWarnings(() => MorphineDb.constraints(Animals));
+        assert.match(bad, /règle de clé étrangère inconnue/);
+      } finally {
+        Animals.def.attributes.breedId.onDelete = rule;
+      }
+      // données corrigées : la contrainte est créée au chargement suivant
+      await loadModels();
+      await assert.rejects(Animals.create({ name: "Orphelin 3", breedId: 777777 }).exec());
+      assert.strictEqual((await Animals.find({ breedId: breed.id }).exec()).length, 1);
+      // after
+      await truncateAll();
+    },
+  );
 
   await test("Test migrate alter : colonne supprimée puis rétablie", async () => {
     await MorphineDb.query(`ALTER TABLE ${Animals.def.tableName} DROP COLUMN legs`);

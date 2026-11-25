@@ -170,7 +170,8 @@ try {
   await Dogs.create({ name: "R" }).exec();
 } catch (error) {
   // error.code = "E_VALIDATION"
-  // error.errors = [{ field: "name", error: "isLength", args: { min: 2, max: 255 }, value: "R" }]
+  // error.errors = [{ field: "name", error: "isLength", args: { min: 2, max: 255 } }]
+  // (with the logValues option, each error also has the refused value)
 }
 ```
 
@@ -200,12 +201,13 @@ await MorphineDb.init({
 await loadModels("./models");
 ```
 
-- `migrate: "alter"` creates the missing tables, adds the missing columns and indexes, changes the columns whose type, default value or `NOT NULL` changed, and creates the foreign key constraints. It never drops a table or a column. On PostgreSQL, a column that becomes `NOT NULL` first gets its default value (or `0`, `""`, the current date) where it is `NULL`, and a type change converts the values with `USING column::type`, which fails if a value cannot be converted. SQLite cannot modify a column: the change is only logged.
+- `migrate: "alter"` creates the missing tables, adds the missing columns and indexes, changes the columns whose type, default value or `NOT NULL` changed, and creates the foreign key constraints. It never drops a table or a column, and never changes the data: if some rows point to a record that does not exist, the foreign key is not created and a warning tells how many rows to fix. On PostgreSQL, a column that becomes `NOT NULL` first gets its default value (or `0`, `""`, the current date) where it is `NULL`, and a type change converts the values with `USING column::type`, which fails if a value cannot be converted. SQLite cannot modify a column: the change is only logged.
 - `migrate: "safe"` (default) leaves the database untouched.
 - `migrate: "recreate"` drops the tables of all the models, then creates them again: **all their data is deleted** at each start. It is refused when `NODE_ENV=production`.
 - `debug: true` logs every SQL query.
 - `catchError: true` throws database errors. With `catchError: false` (default), errors are logged and the query returns `null` (or an empty array for a select).
 - `quietMigration: true` hides the logs of the schema changes made by `migrate: "alter"`.
+- `logValues: true` shows the values of the queries in the SQL error logs and in the validation errors. They are hidden by default, since they can be passwords or personal data (`debug: true` always shows them).
 - `engine` and `collation` set the table options on MySQL (defaults: `InnoDB`, `utf8mb4_general_ci`). A model can override them with its own `engine` and `collation`.
 - With SQLite, `database` is the file name without the `.sqlite` extension.
 
@@ -231,6 +233,28 @@ await Dogs.find("kindId=? AND (name LIKE ? OR name LIKE ?)", [1, "Jazz", "%e%"])
 In a SQL condition, columns can be prefixed with the model name (`Dogs.name`) or with the alias path of a populated association (`kind.name`, `kind.family.name`).
 
 `update`, `updateone` and `destroy` refuse to run without a condition: an empty condition would touch every row. Use `truncate()` or `drop()` to empty a table on purpose.
+
+#### Security: never pass user input as a SQL condition
+
+**A string condition is SQL, inserted as is.** Values must always go through `?` placeholders or the object form, which are escaped by the driver:
+
+```js
+// DANGEROUS: req.params.id = "0 OR 1=1" deletes every row
+await Dogs.destroy(req.params.id).exec();
+
+// safe
+await Dogs.destroy(Number(req.params.id)).exec();
+await Dogs.destroy({ id: req.params.id }).exec();
+await Dogs.destroy("id=?", [req.params.id]).exec();
+```
+
+The ORM protects what it can:
+
+- a string that is only a number (`"12"`, `" 12"`, `"0xc"`, `"12e0"`) is read as a primary key, never as SQL (`WHERE 0xc` would be true for every row);
+- the keys of an object condition must be column names (`name`, `Dogs.name`, `kind.name`); anything else throws an `E_INVALID_WHERE` error, so `find(req.query)` cannot inject SQL;
+- `create` and `update` only write the attributes of the model, whatever the other keys of the data.
+
+`select()`, `orderBy()`, `groupBy()` and `having()` are also inserted as SQL: never build them from user input (choose the sort column from a fixed list).
 
 ### 4. Create a record
 
@@ -331,7 +355,9 @@ await Dogs.update("kindId=?", [1], { birth: "2020-01-01" }).exec();
 const nb = await Dogs.update({ kindId: 1 }, { kindId: 2 }).exec(false);
 ```
 
-The updated rows are read back with the same condition: if the update changes a column used in the condition, the rows no longer match it and you get `[]` (or `undefined` for `updateone`). Use `exec(false)` in that case.
+`updateone()` modifies a single row: it throws an `E_UPDATEONE_MANY` error, and changes nothing, if its condition matches several rows. Use `update()` to modify several rows.
+
+The updated rows are read back with the same condition: if the update changes a column used in the condition, the rows no longer match it and you get `[]` (or `null` for `updateone`). Use `exec(false)` in that case.
 
 Only the attributes of the model are written; other keys are ignored. `updatedAt` is set automatically (pass `ignoreUpdatedAt: true` in the data to keep it).
 

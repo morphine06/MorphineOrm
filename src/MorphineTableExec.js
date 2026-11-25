@@ -15,6 +15,9 @@ const NUMERIC_TYPES = new Set([
 ]);
 
 /*eslint indent: "off"*/
+// Nom de colonne, éventuellement préfixé par un modèle ou un alias : name, Animals.name, breed.species.name
+const SAFE_COLUMN = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+
 /**
  * Valeur d'une colonne NOT NULL à laquelle l'appelant n'a rien fourni.
  *
@@ -271,7 +274,17 @@ class MorphineTableExec {
 
   _createWhere(fromUpdate) {
     let where = "";
-    // console.log('this.where', this.where);
+    // Une chaîne qui n'est qu'un nombre (" 1", "0x1", "1e0") est un identifiant,
+    // jamais du SQL : `WHERE 0x1` est toujours vrai et viderait la table pour
+    // un destroy(req.params.id) dont l'appelant a vérifié Number(id).
+    if (
+      typeof this.where === "string" &&
+      !/^\d+$/.test(this.where) &&
+      this.where.trim() !== "" &&
+      Number.isFinite(Number(this.where))
+    ) {
+      this.where = Number(this.where);
+    }
     // Un identifiant filtre TOUJOURS sur la clé primaire, 0 et NaN compris : ces deux
     // valeurs étant falsy, elles tombaient auparavant dans le `!this.where` ci-dessous,
     // donc findone(0) renvoyait la première ligne venue et updateone(0, data) écrivait
@@ -303,6 +316,15 @@ class MorphineTableExec {
     } else {
       where = "1=1";
       Object.entries(this.where).forEach(([key, val]) => {
+        // La clé est insérée dans le SQL : seulement un nom de colonne, éventuellement
+        // préfixé (Animals.name, breed.name). find(req.query) ne doit rien injecter.
+        if (!SAFE_COLUMN.test(key)) {
+          const err = new Error(
+            `${this.modelname} : nom de colonne invalide dans la condition : ${JSON.stringify(key)}`,
+          );
+          err.code = "E_INVALID_WHERE";
+          throw err;
+        }
         if (!key.includes(".")) key = `${this.modelname}.${key}`;
         where += ` AND ${key}=?`;
         this.whereData.push(val);
@@ -394,15 +416,18 @@ class MorphineTableExec {
   _createUpdateQuery() {
     let vals = [];
     for (const [key, val] of Object.entries(this.data)) {
-      if (this.def.attributes[key]) {
+      if (Object.prototype.hasOwnProperty.call(this.def.attributes, key)) {
         // Colonne non qualifiée : SQLite et PostgreSQL refusent `alias.colonne`
         // dans SET, et pour un UPDATE mono-table MySQL l'entend de la même façon.
         vals.push(`${key}=?`);
         this.whereData.push(val);
       }
     }
+    const nbSet = this.whereData.length;
     const where = this._createWhere(true);
     this._refuseWhereOnEveryRow(where, "UPDATE");
+    // pour le contrôle de updateone() : la condition et ses seules valeurs
+    this._updateWhere = { sql: where, data: this.whereData.slice(nbSet) };
     let query = `UPDATE ${this.def.tableName} AS ${this.modelname} SET ${vals.join(", ")} WHERE ${where}`;
     return query;
   }
@@ -441,6 +466,34 @@ class MorphineTableExec {
         `Vérifiez l'identifiant passé ; utilisez truncate() ou drop() pour un vidage volontaire.`,
     );
   }
+  // updateone() modifie une ligne : il refuse une condition qui en désigne
+  // plusieurs. Une condition sur la seule clé primaire n'a pas besoin de ce
+  // contrôle, qui coûterait une requête de plus à chaque écriture.
+  async _refuseSeveralRows() {
+    const w = this.where;
+    const onPrimary =
+      typeof w === "number" ||
+      (typeof w === "string" && /^\d+$/.test(w)) ||
+      (w &&
+        typeof w === "object" &&
+        Object.keys(w).length === 1 &&
+        [this.primary, `${this.modelname}.${this.primary}`].includes(Object.keys(w)[0]));
+    if (onPrimary) return;
+    const { sql, data } = this._updateWhere;
+    const rows = await this.connection.query(
+      `SELECT COUNT(*) AS cmpt FROM ${this.def.tableName} AS ${this.modelname} WHERE ${sql}`,
+      data,
+    );
+    const nb = rows ? Number(rows[0].cmpt) : 0;
+    if (nb > 1) {
+      const err = new Error(
+        `${this.modelname}.updateone() : la condition désigne ${nb} lignes ; utilisez update() pour en modifier plusieurs.`,
+      );
+      err.code = "E_UPDATEONE_MANY";
+      throw err;
+    }
+  }
+
   _createTruncateQuery() {
     let query;
     if (this.MorphineDb.config.type == "sqlite3") query = `DELETE FROM ${this.def.tableName}`;
@@ -719,7 +772,10 @@ class MorphineTableExec {
         throw new Error(`${this.modelname}.${fieldName} : validator "${fn}" inconnu`);
       }
       if (!validator[fn](String(value), args)) {
-        errors.push({ field: fieldName, error: fn, args, value });
+        const error = { field: fieldName, error: fn, args };
+        // la valeur refusée peut être une donnée sensible (mot de passe…)
+        if (this.MorphineDb.config.logValues) error.value = value;
+        errors.push(error);
       }
     }
     return errors;
@@ -774,6 +830,7 @@ class MorphineTableExec {
         this._throwIfInvalid();
         this._preTreatment();
         query = this._createUpdateQuery();
+        if (this.onlyOne) await this._refuseSeveralRows();
         break;
       case "DELETE":
         query = this._createDestroyQuery();

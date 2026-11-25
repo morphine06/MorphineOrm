@@ -4,6 +4,19 @@ const fs = require("fs");
 const MorphineTable = require("./MorphineTable.js");
 // const { Config } = require("./Config.js");
 
+// Journalise une erreur SQL. Les valeurs de la requête (mots de passe hachés,
+// e-mails, données personnelles…) n'apparaissent qu'avec l'option logValues ;
+// error.sql, où mysql2 les recopie, est retiré de l'erreur rendue à l'appelant.
+function logSqlError(config, error, sql, sqlData = []) {
+  if (config.logValues) {
+    console.warn(clc.red("sql-error"), error, sql, sqlData);
+    return;
+  }
+  if (error && typeof error === "object") delete error.sql;
+  const nb = sqlData.length ? ` (${sqlData.length} valeur(s) masquée(s), option logValues)` : "";
+  console.warn(clc.red("sql-error"), error?.code || "", error?.message || error, "\n ", sql + nb);
+}
+
 const MorphineDb = new (class {
   constructor() {
     this.models = {};
@@ -18,6 +31,7 @@ const MorphineDb = new (class {
     if (this.config.type == "sqlite3") {
       const sqlite3 = require("sqlite3").verbose();
       const db = new sqlite3.Database(this.config.database + ".sqlite");
+      const cfg = this.config;
       this.connection = {
         db: db,
         catchError: this.config.catchError,
@@ -30,7 +44,7 @@ const MorphineDb = new (class {
               if (err) {
                 if (this.catchError) reject(err);
                 else {
-                  console.warn(clc.red("sql-error"), err, sql, sqlData);
+                  logSqlError(cfg, err, sql, sqlData);
                   resolve(null);
                 }
               } else resolve(result);
@@ -62,6 +76,7 @@ const MorphineDb = new (class {
         port: this.config.port || 5432,
       });
       await client.connect();
+      const cfg = this.config;
       this.connection = {
         client: client,
         catchError: this.config.catchError,
@@ -80,7 +95,7 @@ const MorphineDb = new (class {
             return results.rows;
           } catch (error) {
             if (this.catchError) throw error;
-            console.warn(clc.red("sql-error"), error, sql, sqlData);
+            logSqlError(cfg, error, sql, sqlData);
             return null;
           }
         },
@@ -95,6 +110,7 @@ const MorphineDb = new (class {
       delete con.collation;
       delete con.debug;
       delete con.quietMigration;
+      delete con.logValues;
       const pool = mysql.createPool({
         ...con,
         host: this.config.host || "localhost",
@@ -112,21 +128,12 @@ const MorphineDb = new (class {
         conn.query("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci");
       });
 
+      const cfg = this.config;
       this.connection = {
         pool,
         connection: null,
         catchError: this.config.catchError,
         query: async function (sql, sqlData = []) {
-          // let connection;
-          // if (!this.connection) {
-          // 	console.log("---------------get new connection from pool---------------");
-          // 	try {
-          // 		this.connection = await this.pool.getConnection();
-          // 	} catch (error) {
-          // 		console.warn("connection-error", error);
-          // 		return null;
-          // 	}
-          // }
           try {
             let results = await this.pool.query(sql, sqlData);
             return results[0];
@@ -138,7 +145,7 @@ const MorphineDb = new (class {
               const tableName = match ? match[1] : "inconnue";
               console.warn(clc.yellow(`Création de la table ${tableName}`));
             } else {
-              console.warn(clc.red("sql-error"), error, sql, sqlData);
+              logSqlError(cfg, error, sql, sqlData);
             }
             if (this.catchError) throw error;
             return null;
@@ -271,10 +278,33 @@ const MorphineDb = new (class {
         await this.connection.query(q);
       }
       if (tocreate && (link.val.onDelete || link.val.onUpdate)) {
-        // warning remet à null les valeurs qui ne sont pas dans la table liée
-        await this.connection.query(
-          `UPDATE ${id(tableName)} SET ${id(link.key)} = NULL WHERE ${id(link.key)} NOT IN (SELECT ${id(target.primary)} FROM ${id(target.def.tableName)})`,
+        // onDelete / onUpdate sont insérés dans le SQL : seulement les règles connues.
+        const rules = ["RESTRICT", "CASCADE", "SET NULL", "NO ACTION", "SET DEFAULT"];
+        const badRule = [link.val.onDelete, link.val.onUpdate].find(
+          (r) => r && !rules.includes(String(r).toUpperCase()),
         );
+        if (badRule) {
+          console.warn(
+            clc.red(
+              `@Warning - ${tableName}.${link.key} : règle de clé étrangère inconnue "${badRule}", contrainte non créée`,
+            ),
+          );
+          continue;
+        }
+        // Les données ne sont jamais modifiées : si des valeurs ne pointent vers
+        // aucune ligne, la contrainte échouerait ; on la laisse de côté en le signalant.
+        const orphans = await this.connection.query(
+          `SELECT COUNT(*) AS n FROM ${id(tableName)} WHERE ${id(link.key)} IS NOT NULL AND ${id(link.key)} NOT IN (SELECT ${id(target.primary)} FROM ${id(target.def.tableName)})`,
+        );
+        const nbOrphans = orphans ? Number(orphans[0].n) : 0;
+        if (nbOrphans) {
+          console.warn(
+            clc.red(
+              `@Warning - ${tableName}.${link.key} : ${nbOrphans} ligne(s) pointent vers un ${target.modelname} inexistant ; clé étrangère non créée. Corrigez ces lignes, elle le sera au prochain démarrage.`,
+            ),
+          );
+          continue;
+        }
         let q = `ALTER TABLE ${id(tableName)} ADD CONSTRAINT ${id(`${tableName}_${target.def.tableName}_${link.key}_fk`)} FOREIGN KEY (${id(link.key)}) REFERENCES ${id(target.def.tableName)} (${id(target.primary)})`;
         if (link.val.onDelete) q += ` ON DELETE ${link.val.onDelete}`;
         if (link.val.onUpdate) q += ` ON UPDATE ${link.val.onUpdate}`;
@@ -342,7 +372,6 @@ const MorphineDb = new (class {
       let nullChanged = false;
       for (let iRow = 0; iRow < describe.length; iRow++) {
         const row = describe[iRow];
-        // console.log("row", row);
         if (this.config.type == "sqlite3") {
           if (row.name == fieldName) {
             if (field.notnull === false && row.notnull == 1) nullChanged = true;
@@ -361,7 +390,6 @@ const MorphineDb = new (class {
           }
         }
       }
-      // console.log("nullChanged", nullChanged, def.tableName, fieldName);
       if (type1) {
         // type1 = type1.replace(/\(.*\)/, "");
         // if (type1.indexOf("(") <0) type1 = type1.substring(0, type1.indexOf("("));
@@ -391,7 +419,6 @@ const MorphineDb = new (class {
         (type1.toLowerCase() != type2.toLowerCase() ||
           (def2 != field.defaultsTo && type1.toLowerCase() != "text"))
       ) {
-        console.log(type1, type2, def2);
         let q =
           "ALTER TABLE " +
           def.tableName +
@@ -636,7 +663,6 @@ const MorphineDb = new (class {
         `SELECT * FROM pg_indexes WHERE tablename='${def.tableName.toLowerCase()}'`,
       );
     else rows2 = await this.connection.query(`SHOW INDEX FROM ${def.tableName}`);
-    // console.log("🚀 ~ file: MorphineDb.js:306 ~ updateIndexes ~ rows2:", `SELECT * FROM pg_indexes WHERE tablename='${def.tableName}'`, rows2);
     for (const [fieldName, field] of Object.entries(def.attributes)) {
       let createIndex = false;
       //let createUnique = false;
@@ -732,7 +758,6 @@ const MorphineDb = new (class {
     }
   }
   _ormTypeToDatabaseType(field, info = "type") {
-    // console.log("🚀 ~ file: MorphineDb.js:369 ~ _ormTypeToDatabaseType ~ field:", field);
     let typeJS = "";
     let ormtype = field.type.toLowerCase();
     let ormlength = field.length;
@@ -938,15 +963,10 @@ function findModelFiles(dir) {
 }
 
 async function loadModels(dir, silently = false) {
-  // let d = new Date();
   // let where = "/models";
   // if (Config.app.mode == "production") where = "/lib";
-  // console.log("process.cwd() + where", process.cwd() + where);
   let files = findModelFiles(dir ? path.resolve(dir) : path.join(process.cwd(), "models"));
-  // console.log(dir, files)
   console.warn(clc.yellow("@Info - Models availables :"));
-  // console.log("d1b = ", new Date() - d);
-  // d = new Date();
   for (let iFile = 0; iFile < files.length; iFile++) {
     let file = files[iFile];
     file = file.substring(0, file.length - 3);
@@ -998,18 +1018,12 @@ async function loadModels(dir, silently = false) {
     for (const model of Object.values(MorphineDb.models)) {
       await MorphineDb.synchronize(model.def);
     }
-    // console.log("d3b = ", new Date() - d);
-    // d = new Date();
 
     // warning, je désactive les contraintes car trop long à calculer
     for (const model of Object.values(MorphineDb.models)) {
       await MorphineDb.constraints(model);
     }
-
-    // console.log("d4b = ", new Date() - d);
-    // d = new Date();
   }
-  // console.log("MorphineDb.models", MorphineDb.models);
 }
 
 const Migration = new (class {
