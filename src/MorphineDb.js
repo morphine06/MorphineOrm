@@ -1,6 +1,7 @@
 const path = require("path");
 const clc = require("cli-color");
 const fs = require("fs");
+const { AsyncLocalStorage } = require("node:async_hooks");
 const MorphineTable = require("./MorphineTable.js");
 // const { Config } = require("./Config.js");
 
@@ -17,6 +18,47 @@ function logSqlError(config, error, sql, sqlData = []) {
   console.warn(clc.red("sql-error"), error?.code || "", error?.message || error, "\n ", sql + nb);
 }
 
+// Transaction en cours dans le contexte asynchrone : les requêtes des modèles
+// lancées depuis le callback de MorphineDb.transaction() y passent d'elles-mêmes.
+const transactionContext = new AsyncLocalStorage();
+
+// Transforme un exécuteur brut (sql, valeurs) en query() de l'ORM : les erreurs
+// sont journalisées (valeurs masquées), puis levées si catchError, sinon la
+// requête rend null. Dans une transaction, une erreur est toujours levée : elle
+// doit annuler la transaction.
+function makeQuery(db, run, { alwaysThrow = false } = {}) {
+  return async function (sql, sqlData = [], opts = {}) {
+    try {
+      return await run(sql, sqlData);
+    } catch (error) {
+      if (!opts.silent) logSqlError(db.config, error, sql, sqlData);
+      if (alwaysThrow || this.catchError) throw error;
+      return null;
+    }
+  };
+}
+
+// Options propres à l'ORM, à ne pas transmettre aux drivers.
+const ORM_OPTIONS = [
+  "type",
+  "migrate",
+  "debug",
+  "catchError",
+  "engine",
+  "collation",
+  "quietMigration",
+  "logValues",
+  "sqlMode",
+];
+
+function driverOptions(config) {
+  const res = {};
+  for (const [k, v] of Object.entries(config)) {
+    if (v !== undefined && !ORM_OPTIONS.includes(k)) res[k] = v;
+  }
+  return res;
+}
+
 const MorphineDb = new (class {
   constructor() {
     this.models = {};
@@ -28,147 +70,273 @@ const MorphineDb = new (class {
     this.config.type ??= "mysql2";
     this.config.catchError ??= false;
 
-    if (this.config.type == "sqlite3") {
-      const sqlite3 = require("sqlite3").verbose();
-      const db = new sqlite3.Database(this.config.database + ".sqlite");
-      const cfg = this.config;
-      this.connection = {
-        db: db,
-        catchError: this.config.catchError,
-        query: async function (sql, sqlData = []) {
-          // Une lecture rend ses lignes (all) ; une écriture rend, comme mysql2,
-          // { affectedRows, insertId } (run), que all() ne fournit pas.
-          const isRead = /^\s*(SELECT|PRAGMA|WITH)\b/i.test(sql);
-          return new Promise((resolve, reject) => {
-            const done = (err, result) => {
-              if (err) {
-                if (this.catchError) reject(err);
-                else {
-                  logSqlError(cfg, err, sql, sqlData);
-                  resolve(null);
-                }
-              } else resolve(result);
-            };
-            if (isRead) this.db.all(sql, sqlData, (err, rows) => done(err, rows));
-            else
-              this.db.run(sql, sqlData, function (err) {
-                done(err, err ? null : { affectedRows: this.changes, insertId: this.lastID });
-              });
-          });
-        },
-      };
-    } else if (this.config.type == "pg") {
-      const { Client, types } = require("pg");
-      const client = new Client({
-        ...config,
-        // Comme l'option dateStrings de mysql2 : DATE, TIMESTAMP et TIMESTAMPTZ
-        // restent des chaînes au lieu de devenir des objets Date.
-        ...(this.config.dateStrings && {
-          types: {
-            getTypeParser: (oid, format) =>
-              [1082, 1114, 1184].includes(oid) ? (v) => v : types.getTypeParser(oid, format),
-          },
-        }),
-        host: this.config.host || "localhost",
-        user: this.config.user || "root",
-        password: this.config.password || "",
-        database: this.config.database || "test",
-        port: this.config.port || 5432,
-      });
-      await client.connect();
-      const cfg = this.config;
-      this.connection = {
-        client: client,
-        catchError: this.config.catchError,
-        query: async function (sql, sqlData = []) {
-          //replace ? by $1, $2, $3, ...
-          let i = 1;
-          while (sql.indexOf("?") != -1) {
-            sql = sql.replace("?", "$" + i);
-            i++;
-          }
-          try {
-            let results = await this.client.query(sql, sqlData);
-            // Comme mysql2 : le nombre de lignes touchées par une écriture.
-            // non énumérable : elle ne doit pas apparaître dans les lignes rendues par find()
-            Object.defineProperty(results.rows, "affectedRows", { value: results.rowCount });
-            return results.rows;
-          } catch (error) {
-            if (this.catchError) throw error;
-            logSqlError(cfg, error, sql, sqlData);
-            return null;
-          }
-        },
-      };
-    } else {
-      const mysql = require("mysql2/promise");
-      const con = { ...config };
-      delete con.migrate;
-      delete con.type;
-      delete con.catchError;
-      delete con.engine;
-      delete con.collation;
-      delete con.debug;
-      delete con.quietMigration;
-      delete con.logValues;
-      const pool = mysql.createPool({
-        ...con,
-        host: this.config.host || "localhost",
-        user: this.config.user || "root",
-        password: this.config.password || "",
-        database: this.config.database || "test",
-        port: this.config.port || 3306,
-        charset: "utf8mb4", //this.config.charset ||
-        waitForConnections: true,
-        connectionLimit: 10,
-        queueLimit: 0,
-      });
-      pool.on("connection", (conn) => {
-        conn.query("SET SESSION sql_mode = ''");
-        conn.query("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci");
-      });
+    if (this.config.type == "sqlite3") this.connection = await this._initSqlite();
+    else if (this.config.type == "pg") this.connection = await this._initPg();
+    else this.connection = await this._initMysql();
+  }
 
-      const cfg = this.config;
-      this.connection = {
-        pool,
-        connection: null,
-        catchError: this.config.catchError,
-        query: async function (sql, sqlData = []) {
+  async _initSqlite() {
+    const sqlite3 = require("sqlite3").verbose();
+    const db = await new Promise((resolve, reject) => {
+      const d = new sqlite3.Database(this.config.database + ".sqlite", (err) =>
+        err ? reject(err) : resolve(d),
+      );
+    });
+    // Une seule connexion : pendant une transaction, les autres requêtes
+    // attendent qu'elle se termine, sinon elles s'y mêleraient.
+    const state = { tx: null };
+    const raw = (sql, sqlData) =>
+      new Promise((resolve, reject) => {
+        // Une lecture rend ses lignes (all) ; une écriture rend, comme mysql2,
+        // { affectedRows, insertId } (run), que all() ne fournit pas.
+        if (/^\s*(SELECT|PRAGMA|WITH)\b/i.test(sql)) {
+          db.all(sql, sqlData, (err, rows) => (err ? reject(err) : resolve(rows)));
+        } else {
+          db.run(sql, sqlData, function (err) {
+            if (err) reject(err);
+            else resolve({ affectedRows: this.changes, insertId: this.lastID });
+          });
+        }
+      });
+    const outside = async (sql, sqlData) => {
+      while (state.tx) await state.tx;
+      return raw(sql, sqlData);
+    };
+    return {
+      db,
+      catchError: this.config.catchError,
+      query: makeQuery(this, outside),
+      begin: async () => {
+        while (state.tx) await state.tx;
+        let finish;
+        state.tx = new Promise((resolve) => (finish = resolve));
+        const end = async (sql) => {
           try {
-            let results = await this.pool.query(sql, sqlData);
-            return results[0];
-          } catch (error) {
-            if (error.code === "ER_NO_SUCH_TABLE") {
-              const match = /Table '(?:[^.']+\.)?([^']+)' doesn't exist/.exec(
-                error.sqlMessage || "",
-              );
-              const tableName = match ? match[1] : "inconnue";
-              console.warn(clc.yellow(`Création de la table ${tableName}`));
-            } else {
-              logSqlError(cfg, error, sql, sqlData);
-            }
-            if (this.catchError) throw error;
-            return null;
+            await raw(sql, []);
+          } finally {
+            state.tx = null;
+            finish();
           }
+        };
+        try {
+          await raw("BEGIN", []);
+        } catch (e) {
+          state.tx = null;
+          finish();
+          throw e;
+        }
+        return {
+          query: makeQuery(this, raw, { alwaysThrow: true }),
+          commit: () => end("COMMIT"),
+          rollback: () => end("ROLLBACK"),
+        };
+      },
+      end: () => new Promise((resolve, reject) => db.close((e) => (e ? reject(e) : resolve()))),
+    };
+  }
+
+  async _initPg() {
+    const { Pool, types } = require("pg");
+    const opts = driverOptions(this.config);
+    const pool = new Pool({
+      host: "localhost",
+      user: "root",
+      password: "",
+      database: "test",
+      port: 5432,
+      // même option que mysql2, sous les deux noms
+      max: opts.connectionLimit ?? 10,
+      ...opts,
+      // Comme l'option dateStrings de mysql2 : DATE, TIMESTAMP et TIMESTAMPTZ
+      // restent des chaînes au lieu de devenir des objets Date.
+      ...(this.config.dateStrings && {
+        types: {
+          getTypeParser: (oid, format) =>
+            [1082, 1114, 1184].includes(oid) ? (v) => v : types.getTypeParser(oid, format),
         },
+      }),
+    });
+    // Une connexion inactive qui tombe (redémarrage du serveur…) émet une erreur
+    // sur le pool : sans écouteur, elle arrêterait le processus. Le pool la
+    // remplace à la requête suivante.
+    pool.on("error", (err) =>
+      console.warn(clc.red("sql-error"), "connexion PostgreSQL perdue :", err.message),
+    );
+    const run = (target) => async (sql, sqlData) => {
+      // ? devient $1, $2, $3…
+      let i = 1;
+      while (sql.indexOf("?") != -1) sql = sql.replace("?", "$" + i++);
+      const results = await target.query(sql, sqlData);
+      // Comme mysql2 : le nombre de lignes touchées par une écriture,
+      // non énumérable pour ne pas apparaître dans les lignes rendues par find().
+      Object.defineProperty(results.rows, "affectedRows", { value: results.rowCount });
+      return results.rows;
+    };
+    await this._checkConnection(pool, () => pool.query("SELECT 1"));
+    return {
+      pool,
+      catchError: this.config.catchError,
+      query: makeQuery(this, run(pool)),
+      begin: async () => {
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+        } catch (e) {
+          client.release(e);
+          throw e;
+        }
+        const end = async (sql) => {
+          try {
+            await client.query(sql);
+            client.release();
+          } catch (e) {
+            client.release(e); // connexion douteuse : détruite plutôt que rendue au pool
+            throw e;
+          }
+        };
+        return {
+          query: makeQuery(this, run(client), { alwaysThrow: true }),
+          commit: () => end("COMMIT"),
+          rollback: () => end("ROLLBACK"),
+        };
+      },
+      end: () => pool.end(),
+    };
+  }
+
+  async _initMysql() {
+    const mysql = require("mysql2/promise");
+    // Les options de l'appelant l'emportent sur ces valeurs par défaut.
+    const pool = mysql.createPool({
+      host: "localhost",
+      user: "root",
+      password: "",
+      database: "test",
+      port: 3306,
+      charset: "utf8mb4",
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      ...driverOptions(this.config),
+    });
+    // Réglages de chaque nouvelle connexion, passés avant sa première requête.
+    // sql_mode vide par défaut : l'ORM écrit des dates "0000-00-00" et des clés
+    // étrangères à 0, que le mode strict refuse.
+    const collation = this.config.collation || "utf8mb4_general_ci";
+    if (!/^[A-Za-z0-9_]+$/.test(collation)) throw new Error(`collation invalide : ${collation}`);
+    const charset = collation.split("_")[0];
+    const sqlMode = this.config.sqlMode ?? "";
+    pool.on("connection", (conn) => {
+      const onError = (err) => {
+        if (err) console.warn(clc.red("sql-error"), "réglage de la connexion MySQL :", err.message);
       };
+      conn.query("SET SESSION sql_mode = ?", [sqlMode], onError);
+      conn.query(`SET NAMES ${charset} COLLATE ${collation}`, onError);
+    });
+    const run = (target) => async (sql, sqlData) => (await target.query(sql, sqlData))[0];
+    await this._checkConnection(pool, () => pool.query("SELECT 1"));
+    return {
+      pool,
+      catchError: this.config.catchError,
+      query: makeQuery(this, run(pool)),
+      begin: async () => {
+        const conn = await pool.getConnection();
+        try {
+          await conn.beginTransaction();
+        } catch (e) {
+          conn.destroy();
+          throw e;
+        }
+        const end = async (fn) => {
+          try {
+            await fn();
+            conn.release();
+          } catch (e) {
+            conn.destroy(); // connexion douteuse : détruite plutôt que rendue au pool
+            throw e;
+          }
+        };
+        return {
+          query: makeQuery(this, run(conn), { alwaysThrow: true }),
+          commit: () => end(() => conn.commit()),
+          rollback: () => end(() => conn.rollback()),
+        };
+      },
+      end: () => pool.end(),
+    };
+  }
+
+  // init() échoue tout de suite si la base est injoignable (serveur arrêté, mauvais
+  // mot de passe…), au lieu de laisser démarrer une application sans base.
+  async _checkConnection(pool, check) {
+    try {
+      await check();
+    } catch (error) {
+      await pool.end().catch(() => {});
+      delete error.sql;
+      error.message = `MorphineDb.init() : connexion à la base impossible : ${error.message}`;
+      throw error;
     }
   }
 
+  // Connexion des requêtes : celle de la transaction en cours, sinon la principale.
+  currentConnection() {
+    const tx = transactionContext.getStore();
+    return tx && !tx.done ? tx.connection : this.connection;
+  }
+
   async query(sql, sqlData = []) {
-    return await this.connection.query(sql, sqlData);
+    const connection = this.currentConnection();
+    if (!connection)
+      throw new Error("MorphineDb.query() : pas de connexion, init() n'a pas été appelé");
+    return await connection.query(sql, sqlData);
+  }
+
+  /**
+   * Exécute fn dans une transaction : validée si fn se termine, annulée si fn
+   * lève une erreur (relancée ensuite). Toutes les requêtes lancées depuis fn,
+   * par les modèles ou par MorphineDb.query(), y passent. Un appel imbriqué
+   * rejoint la transaction en cours.
+   */
+  async transaction(fn) {
+    const current = transactionContext.getStore();
+    if (current && !current.done) return fn(current.api);
+    if (!this.connection)
+      throw new Error("MorphineDb.transaction() : pas de connexion, init() n'a pas été appelé");
+    const tx = await this.connection.begin();
+    const store = {
+      done: false,
+      connection: { query: tx.query, catchError: true },
+      api: { query: (sql, sqlData = []) => tx.query(sql, sqlData) },
+    };
+    let result;
+    try {
+      result = await transactionContext.run(store, () => fn(store.api));
+    } catch (error) {
+      store.done = true;
+      await tx
+        .rollback()
+        .catch((e) =>
+          console.warn(
+            clc.red("sql-error"),
+            "annulation de la transaction impossible :",
+            e.message,
+          ),
+        );
+      throw error;
+    }
+    store.done = true;
+    await tx.commit();
+    return result;
   }
 
   // Ferme la connexion (ou le pool) : sans cela, un script ne se termine jamais.
   async close() {
     const c = this.connection;
     if (!c) return;
-    if (c.pool) await c.pool.end();
-    else if (c.client) await c.client.end();
-    else if (c.db)
-      await new Promise((resolve, reject) => c.db.close((e) => (e ? reject(e) : resolve())));
     this.connection = null;
     this._referentialConstraints = null;
+    await c.end();
   }
 
   // information_schema.referential_constraints oblige le serveur à ouvrir la
@@ -730,7 +898,9 @@ const MorphineDb = new (class {
     let exists = true;
     try {
       // LIMIT 1 : PostgreSQL ne connaît pas la forme LIMIT 0,1.
-      const rows1 = await this.connection.query(`SELECT * FROM ${def.tableName} LIMIT 1`, []);
+      const rows1 = await this.connection.query(`SELECT * FROM ${def.tableName} LIMIT 1`, [], {
+        silent: true, // table absente : attendu, elle va être créée
+      });
       if (rows1 === null) exists = false;
     } catch (error) {
       exists = false;

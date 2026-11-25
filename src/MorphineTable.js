@@ -64,10 +64,10 @@ class MorphineTable {
     meta.insertPlaceholdersList = meta.insertableFields.map(() => "?").join(", ");
     this._meta = meta;
   }
-  // Lue à chaque requête : après close() puis init(), un modèle déjà obtenu
-  // utilise la nouvelle connexion.
+  // Lue à chaque requête : celle de la transaction en cours, et après close()
+  // puis init(), la nouvelle connexion.
   get connection() {
-    return this.MorphineDb.connection;
+    return this.MorphineDb.currentConnection();
   }
   createEmpty(options = {}) {
     let opts = {

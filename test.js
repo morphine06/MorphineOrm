@@ -13,6 +13,7 @@ const DB_TYPE = process.argv[2] || "mysql2";
 // Code d'erreur renvoyé par chaque driver pour une table inexistante.
 const NO_SUCH_TABLE = { mysql2: "ER_NO_SUCH_TABLE", sqlite3: "SQLITE_ERROR", pg: "42P01" };
 
+// Configuration de connexion de la base testée ; overrides l'emporte sur tout.
 function dbConfig(overrides = {}) {
   const common = {
     type: DB_TYPE,
@@ -20,23 +21,18 @@ function dbConfig(overrides = {}) {
     debug: false,
     catchError: true,
     quietMigration: true,
-    ...overrides,
   };
-  if (DB_TYPE === "sqlite3") return { ...common, database: "morphineorm-test" };
-  if (DB_TYPE === "pg") {
-    return {
-      ...common,
+  const byType = {
+    sqlite3: { database: "morphineorm-test" },
+    pg: {
       host: process.env.PGHOST || "localhost",
       user: process.env.PGUSER || "postgres",
       password: process.env.PGPASSWORD || "",
       database: process.env.PGDATABASE || "morphineorm",
       port: process.env.PGPORT || 5432,
       dateStrings: true,
-    };
-  }
-  if (DB_TYPE === "mysql2") {
-    return {
-      ...common,
+    },
+    mysql2: {
       host: process.env.DBHOST,
       user: process.env.DBUSER,
       password: process.env.DBPASSWORD,
@@ -45,9 +41,10 @@ function dbConfig(overrides = {}) {
       dateStrings: true,
       engine: "InnoDB",
       collation: "utf8mb4_general_ci",
-    };
-  }
-  throw new Error(`Base inconnue : ${DB_TYPE} (mysql2, sqlite3 ou pg)`);
+    },
+  };
+  if (!byType[DB_TYPE]) throw new Error(`Base inconnue : ${DB_TYPE} (mysql2, sqlite3 ou pg)`);
+  return { ...common, ...byType[DB_TYPE], ...overrides };
 }
 
 async function initApp() {
@@ -1197,6 +1194,132 @@ initApp().then(async () => {
     assert.match(logs, /Ghosts\.ownerId : modèle Inexistant introuvable/);
   });
 
+  await test("Transaction validée : toutes les écritures et la valeur rendue", async () => {
+    const result = await MorphineDb.transaction(async (tx) => {
+      const dog = await Species.create({ name: "Dog" }).exec();
+      const breed = await Breeds.create({ name: "Labrador", speciesId: dog.id }).exec();
+      await Animals.create({ name: "Rex", breedId: breed.id }).exec();
+      await tx.query(`UPDATE ${Species.def.tableName} SET name=? WHERE id=?`, ["Dog 2", dog.id]);
+      // dans la transaction, les lectures voient ses propres écritures
+      assert.strictEqual((await Species.findone(dog.id).exec()).name, "Dog 2");
+      return breed.id;
+    });
+    assert.strictEqual(typeof result, "number");
+    assert.strictEqual(await Animals.count().exec(), 1);
+    assert.strictEqual((await Species.findone({ name: "Dog 2" }).exec()).name, "Dog 2");
+    // after
+    await truncateAll();
+  });
+
+  await test("Transaction annulée : une erreur défait tout et est relancée", async () => {
+    await Species.create({ name: "Avant" }).exec();
+    await assert.rejects(
+      MorphineDb.transaction(async () => {
+        await Species.create({ name: "Dog" }).exec();
+        await Species.updateone({ name: "Avant" }, { name: "Modifié" }).exec();
+        throw new Error("échec métier");
+      }),
+      /échec métier/,
+    );
+    assert.strictEqual(await Species.count().exec(), 1);
+    assert.strictEqual((await Species.find().exec())[0].name, "Avant");
+    // une erreur de validation annule aussi
+    const { breed } = await createDogs();
+    await assert.rejects(
+      MorphineDb.transaction(async () => {
+        await Animals.create({ name: "Rex", breedId: breed.id }).exec();
+        await Animals.create({ name: "R", breedId: breed.id }).exec();
+      }),
+      { code: "E_VALIDATION" },
+    );
+    assert.strictEqual(await Animals.count().exec(), 0);
+    // after
+    await truncateAll();
+  });
+
+  await test("Transaction : une erreur SQL annule même avec catchError: false", async () => {
+    MorphineDb.connection.catchError = false;
+    try {
+      await captureWarnings(() =>
+        assert.rejects(
+          MorphineDb.transaction(async () => {
+            await Species.create({ name: "Dog" }).exec();
+            await Species.find("colonne_inexistante=1").exec();
+          }),
+        ),
+      );
+    } finally {
+      MorphineDb.connection.catchError = true;
+    }
+    assert.strictEqual(await Species.count().exec(), 0);
+  });
+
+  await test("Transaction imbriquée : rejoint la transaction en cours", async () => {
+    await assert.rejects(
+      MorphineDb.transaction(async () => {
+        await Species.create({ name: "Dehors" }).exec();
+        await MorphineDb.transaction(async () => {
+          await Species.create({ name: "Dedans" }).exec();
+        });
+        throw new Error("annule les deux");
+      }),
+    );
+    assert.strictEqual(await Species.count().exec(), 0);
+    const nb = await MorphineDb.transaction(async () => {
+      await MorphineDb.transaction(() => Species.create({ name: "A" }).exec());
+      return Species.count().exec();
+    });
+    assert.strictEqual(nb, 1);
+    // after
+    await truncateAll();
+  });
+
+  await test("Transaction : isolée des autres requêtes jusqu'à sa validation", async () => {
+    let created, open;
+    const createdP = new Promise((r) => (created = r));
+    const gate = new Promise((r) => (open = r));
+    const tx = MorphineDb.transaction(async () => {
+      await Species.create({ name: "Dog" }).exec();
+      created();
+      await gate;
+    });
+    await createdP;
+    // requête lancée hors de la transaction
+    const outside = Species.count().exec();
+    if (DB_TYPE !== "sqlite3") {
+      assert.strictEqual(await outside, 0); // la ligne n'est pas encore validée
+      open();
+    } else {
+      open(); // SQLite : une seule connexion, la requête attend la fin de la transaction
+      assert.strictEqual(await outside, 1);
+    }
+    await tx;
+    assert.strictEqual(await Species.count().exec(), 1);
+    // after
+    await truncateAll();
+  });
+
+  await test("Transactions en parallèle", async () => {
+    const names = Array.from({ length: 8 }, (_, i) => `Espèce ${i}`);
+    await Promise.all(
+      names.map((name, i) =>
+        MorphineDb.transaction(async () => {
+          await Species.create({ name }).exec();
+          await Species.create({ name: name + " bis" }).exec();
+          if (i % 2) throw new Error("annulée");
+        }).catch(() => {}),
+      ),
+    );
+    const rows = await Species.find().exec();
+    assert.strictEqual(rows.length, 8); // 4 transactions validées × 2 lignes
+    assert.ok(rows.every((r) => Number(r.name.split(" ")[1]) % 2 === 0));
+    // les connexions ont été rendues : une nouvelle transaction passe
+    await MorphineDb.transaction(() => Species.create({ name: "Après" }).exec());
+    assert.strictEqual(await Species.count().exec(), 9);
+    // after
+    await truncateAll();
+  });
+
   await test("Test migrate alter : colonne supprimée puis rétablie", async () => {
     await MorphineDb.query(`ALTER TABLE ${Animals.def.tableName} DROP COLUMN legs`);
     await loadModels();
@@ -1248,6 +1371,64 @@ initApp().then(async () => {
     const bird = await Species.create({ name: "Bird" }).exec();
     assert.strictEqual(bird.id, 1);
   });
+
+  await test(
+    "Connexion : options du pool, collation, sql_mode",
+    { skip: DB_TYPE === "sqlite3" && "SQLite : pas de pool" },
+    async () => {
+      await MorphineDb.close();
+      try {
+        await MorphineDb.init(
+          dbConfig({
+            migrate: "safe",
+            connectionLimit: 3,
+            collation: "utf8mb4_unicode_ci",
+            sqlMode: "STRICT_TRANS_TABLES",
+          }),
+        );
+        if (DB_TYPE === "pg") {
+          assert.strictEqual(MorphineDb.connection.pool.options.max, 3);
+        } else {
+          const { pool } = MorphineDb.connection;
+          assert.strictEqual(pool.pool.config.connectionLimit, 3);
+          const [session] = await MorphineDb.query(
+            "SELECT @@collation_connection AS coll, @@SESSION.sql_mode AS mode",
+          );
+          assert.strictEqual(session.coll, "utf8mb4_unicode_ci");
+          assert.match(session.mode, /STRICT_TRANS_TABLES/);
+          // chaque connexion du pool reçoit les réglages
+          const sessions = await Promise.all(
+            [1, 2, 3].map(() => MorphineDb.query("SELECT @@collation_connection AS coll")),
+          );
+          assert.ok(sessions.every(([r]) => r.coll === "utf8mb4_unicode_ci"));
+        }
+      } finally {
+        await MorphineDb.close();
+        await MorphineDb.init(dbConfig({ migrate: "safe" }));
+      }
+    },
+  );
+
+  await test(
+    "Connexion : init() échoue si la base est injoignable",
+    { skip: DB_TYPE === "sqlite3" && "SQLite : pas de serveur" },
+    async () => {
+      await MorphineDb.close();
+      try {
+        await assert.rejects(
+          MorphineDb.init(dbConfig({ password: "mauvais-mot-de-passe", user: "personne" })),
+          /connexion à la base impossible/,
+        );
+        await assert.rejects(
+          MorphineDb.init(dbConfig({ port: 1 })),
+          /connexion à la base impossible/,
+        );
+      } finally {
+        await MorphineDb.init(dbConfig({ migrate: "safe" }));
+      }
+      assert.strictEqual(await Species.count().exec(), 1); // la connexion normale fonctionne
+    },
+  );
 
   await test("close() : une requête ensuite échoue clairement, un second close() est sans effet", async () => {
     await MorphineDb.close();

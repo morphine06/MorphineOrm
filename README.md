@@ -210,6 +210,10 @@ await loadModels("./models");
 - `logValues: true` shows the values of the queries in the SQL error logs and in the validation errors. They are hidden by default, since they can be passwords or personal data (`debug: true` always shows them).
 - `engine` and `collation` set the table options on MySQL (defaults: `InnoDB`, `utf8mb4_general_ci`). A model can override them with its own `engine` and `collation`.
 - With SQLite, `database` is the file name without the `.sqlite` extension.
+- `sqlMode` sets the MySQL `sql_mode` of each connection (default: `""`, which accepts the `0000-00-00` dates and the foreign keys at 0 that the ORM writes). With `"STRICT_TRANS_TABLES"`, MySQL refuses a too long string or an invalid number instead of truncating it.
+- MySQL and PostgreSQL use a pool of connections: `connectionLimit` (default `10`; `max` is also accepted on PostgreSQL), `queueLimit`, `idleTimeout` and the other pool options of the driver can be passed. A connection lost (server restart, network) is replaced at the next query.
+
+`init()` checks the connection: it throws if the database cannot be reached (server down, wrong password…), instead of letting the application start without a database.
 
 `loadModels(dir)` loads every `*.model.js` file in `dir` and its subfolders (default: `./models`).
 
@@ -387,7 +391,27 @@ const rows = await MorphineDb.query("SELECT * FROM dogs WHERE name=? AND kindId=
 const rows2 = await Dogs.query("SELECT * FROM dogs WHERE kindId=?", [1]).exec();
 ```
 
-### 10. Hooks
+### 10. Transactions
+
+`MorphineDb.transaction(fn)` runs `fn` in a transaction: it is committed when `fn` ends, and rolled back if `fn` throws (the error is thrown again). It returns what `fn` returns.
+
+```js
+const dog = await MorphineDb.transaction(async (tx) => {
+  const kind = await Kinds.create({ name: "Labrador" }).exec();
+  const dog = await Dogs.create({ name: "Rex", kindId: kind.id }).exec();
+  await tx.query("UPDATE stats SET dogs = dogs + 1");
+  if (!dog.kindId) throw new Error("no kind"); // rolls back both creations
+  return dog;
+});
+```
+
+- Every query started from `fn`, by the models or by `MorphineDb.query()` / `tx.query()`, goes through the transaction, even in the functions that `fn` calls.
+- Inside a transaction, a SQL error always throws (whatever `catchError` is), so that the transaction is rolled back.
+- A `transaction()` called inside another one joins it: there is a single transaction, committed or rolled back as a whole.
+- The other queries of the application do not see the changes until the commit. With SQLite, which has a single connection, they wait for the end of the transaction.
+- Never send `START TRANSACTION` / `BEGIN` yourself with `MorphineDb.query()`: with a pool, the next queries would run on other connections, and the connection would go back to the pool with its transaction still open.
+
+### 11. Hooks
 
 A model can define these async functions:
 
@@ -399,7 +423,7 @@ A model can define these async functions:
 | `beforeTruncate()`                | a TRUNCATE    |                                          |
 | `beforeDrop()`                    | a DROP        |                                          |
 
-### 11. Other methods
+### 12. Other methods
 
 ```js
 // a new record filled with the default values, to prefill a form
