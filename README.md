@@ -391,6 +391,12 @@ const rows = await MorphineDb.query("SELECT * FROM dogs WHERE name=? AND kindId=
 const rows2 = await Dogs.query("SELECT * FROM dogs WHERE kindId=?", [1]).exec();
 ```
 
+The connections are shared by the whole application through the pool: a raw query must not leave anything on its connection.
+
+- A single statement per query (`"SELECT 1; DROP TABLE x"` is refused on MySQL and PostgreSQL).
+- The statements that would change the state of the connection are refused with an `E_SESSION_STATEMENT` error: `BEGIN`, `START TRANSACTION`, `COMMIT`, `ROLLBACK`, `SET`, `USE`, `LOCK`, `XA`, `CREATE TEMPORARY TABLE`… Use `MorphineDb.transaction()` for a transaction, and the `sqlMode` and `collation` options of `init()` for the session settings.
+- Whatever the query did, its connection is reset before going back to the pool (MySQL `COM_RESET_CONNECTION`, PostgreSQL `DISCARD ALL`): session variables, temporary tables and locks (`GET_LOCK()`, `pg_advisory_lock()`…) do not survive it, and an open transaction is rolled back. This costs one round trip more for raw queries only: the queries built by the models are not concerned.
+
 ### 10. Transactions
 
 `MorphineDb.transaction(fn)` runs `fn` in a transaction: it is committed when `fn` ends, and rolled back if `fn` throws (the error is thrown again). It returns what `fn` returns.
@@ -409,7 +415,7 @@ const dog = await MorphineDb.transaction(async (tx) => {
 - Inside a transaction, a SQL error always throws (whatever `catchError` is), so that the transaction is rolled back.
 - A `transaction()` called inside another one joins it: there is a single transaction, committed or rolled back as a whole.
 - The other queries of the application do not see the changes until the commit. With SQLite, which has a single connection, they wait for the end of the transaction.
-- Never send `START TRANSACTION` / `BEGIN` yourself with `MorphineDb.query()`: with a pool, the next queries would run on other connections, and the connection would go back to the pool with its transaction still open.
+- `tx.query()` accepts `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT`, `SET LOCAL` and `SET TRANSACTION`, which do not outlive the transaction; the connection is reset at its end, like after a raw query.
 
 ### 11. Hooks
 

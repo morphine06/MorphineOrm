@@ -1370,7 +1370,141 @@ initApp().then(async () => {
     assert.strictEqual(await Species.count().exec(), 0);
     const bird = await Species.create({ name: "Bird" }).exec();
     assert.strictEqual(bird.id, 1);
+    // after
+    await truncateAll();
   });
+
+  await test("SQL brut : les instructions qui changent l'état de la connexion sont refusées", async () => {
+    const refused = [
+      "BEGIN",
+      "  commit",
+      "/* commentaire */ ROLLBACK",
+      "-- commentaire\nBEGIN",
+      "(BEGIN)",
+    ];
+    if (DB_TYPE !== "sqlite3") {
+      refused.push(
+        "START TRANSACTION",
+        "SET autocommit = 0",
+        "SET FOREIGN_KEY_CHECKS = 0",
+        "CREATE TEMPORARY TABLE t (x INT)",
+      );
+    }
+    if (DB_TYPE === "mysql2")
+      refused.push("USE mysql", "LOCK TABLES Species2 WRITE", "XA START 'x'");
+    if (DB_TYPE === "pg")
+      refused.push("SET search_path = autre", "DISCARD ALL", "LISTEN canal", "END");
+    for (const sql of refused) {
+      await assert.rejects(MorphineDb.query(sql), { code: "E_SESSION_STATEMENT" }, sql);
+      await assert.rejects(Species.query(sql).exec(), { code: "E_SESSION_STATEMENT" }, sql);
+    }
+    // les requêtes ordinaires passent, y compris un UPDATE … SET
+    await Species.create({ name: "Dog" }).exec();
+    const res = await MorphineDb.query(`UPDATE ${Species.def.tableName} SET name=? WHERE name=?`, [
+      "Dog 2",
+      "Dog",
+    ]);
+    assert.strictEqual(res.affectedRows, 1);
+    assert.strictEqual(
+      (await Species.query(`SELECT * FROM ${Species.def.tableName}`).exec()).length,
+      1,
+    );
+    // after
+    await truncateAll();
+  });
+
+  await test("Transaction : SAVEPOINT autorisé, SET refusé", async () => {
+    const rollbackTo = DB_TYPE === "sqlite3" ? "ROLLBACK TO s1" : "ROLLBACK TO SAVEPOINT s1";
+    await MorphineDb.transaction(async (tx) => {
+      await Species.create({ name: "Gardée" }).exec();
+      await tx.query("SAVEPOINT s1");
+      await Species.create({ name: "Annulée" }).exec();
+      await tx.query(rollbackTo);
+      await tx.query("RELEASE SAVEPOINT s1");
+      if (DB_TYPE !== "sqlite3") {
+        await assert.rejects(tx.query("SET FOREIGN_KEY_CHECKS = 0"), {
+          code: "E_SESSION_STATEMENT",
+        });
+      }
+      await assert.rejects(tx.query("COMMIT"), { code: "E_SESSION_STATEMENT" });
+    });
+    assert.deepStrictEqual(
+      (await Species.find().exec()).map((r) => r.name),
+      ["Gardée"],
+    );
+    // after
+    await truncateAll();
+  });
+
+  await test(
+    "SQL brut : la connexion est remise à zéro, même si le refus est contourné",
+    { skip: DB_TYPE === "sqlite3" && "SQLite : pas de pool" },
+    async () => {
+      // une seule connexion : si un état survivait, la requête suivante le verrait
+      await MorphineDb.close();
+      await MorphineDb.init(dbConfig({ migrate: "safe", connectionLimit: 1 }));
+      try {
+        if (DB_TYPE === "pg") {
+          await MorphineDb.query("SELECT set_config('statement_timeout', '1234', false)");
+          assert.strictEqual(
+            (await MorphineDb.query("SHOW statement_timeout"))[0].statement_timeout,
+            "0",
+          );
+          await MorphineDb.query("SELECT pg_advisory_lock(42)");
+          const [locks] = await MorphineDb.query(
+            "SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory'",
+          );
+          assert.strictEqual(locks.n, 0);
+          // une seule instruction par requête, même sans valeurs
+          await assert.rejects(MorphineDb.query("SELECT 1; SELECT 2"));
+        } else {
+          await MorphineDb.query("SELECT @v := 5 AS v");
+          await MorphineDb.query("SELECT GET_LOCK('morphine-test', 0)");
+          const [state] = await MorphineDb.query(
+            "SELECT @v AS v, IS_FREE_LOCK('morphine-test') AS libre, @@sql_mode AS mode, @@collation_connection AS coll",
+          );
+          assert.strictEqual(state.v, null); // variable effacée
+          assert.strictEqual(state.libre, 1); // verrou libéré
+          assert.strictEqual(state.mode, ""); // nos réglages réappliqués
+          assert.strictEqual(state.coll, "utf8mb4_general_ci");
+        }
+        // les requêtes de l'ORM fonctionnent toujours
+        await Species.create({ name: "Dog" }).exec();
+        assert.strictEqual(await Species.count().exec(), 1);
+      } finally {
+        await truncateAll();
+        await MorphineDb.close();
+        await MorphineDb.init(dbConfig({ migrate: "safe" }));
+      }
+    },
+  );
+
+  await test(
+    "Transaction : un SET LOCAL ne survit pas à la transaction",
+    { skip: DB_TYPE !== "pg" && "SET LOCAL : PostgreSQL" },
+    async () => {
+      await MorphineDb.close();
+      await MorphineDb.init(dbConfig({ migrate: "safe", connectionLimit: 1 }));
+      try {
+        await MorphineDb.transaction(async (tx) => {
+          await tx.query("SET LOCAL statement_timeout = 4321");
+          assert.strictEqual(
+            (await tx.query("SHOW statement_timeout"))[0].statement_timeout,
+            "4321ms",
+          );
+          await tx.query("SELECT set_config('lock_timeout', '999', false)");
+        });
+        const [after] = await MorphineDb.query(
+          "SELECT current_setting('statement_timeout') AS st, current_setting('lock_timeout') AS lt",
+        );
+        assert.strictEqual(after.st, "0");
+        assert.strictEqual(after.lt, "0"); // même un réglage de session fait dans la transaction
+      } finally {
+        await MorphineDb.close();
+        await MorphineDb.init(dbConfig({ migrate: "safe" }));
+      }
+    },
+  );
 
   await test(
     "Connexion : options du pool, collation, sql_mode",
@@ -1426,7 +1560,10 @@ initApp().then(async () => {
       } finally {
         await MorphineDb.init(dbConfig({ migrate: "safe" }));
       }
-      assert.strictEqual(await Species.count().exec(), 1); // la connexion normale fonctionne
+      // la connexion normale fonctionne
+      await Species.create({ name: "Dog" }).exec();
+      assert.strictEqual(await Species.count().exec(), 1);
+      await truncateAll();
     },
   );
 

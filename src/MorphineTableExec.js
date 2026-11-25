@@ -851,7 +851,12 @@ class MorphineTableExec {
     }
 
     if (this.def.debug || this.logQuery) console.warn(clc.yellow("query:"), query, this.whereData);
-    const rows = await this.connection.query(query, this.whereData);
+    // Model.query() est du SQL brut : il passe par rawQuery (refus des instructions
+    // de session, connexion remise à zéro) ; le SQL généré par l'ORM, non.
+    const rows =
+      this.command == "QUERY"
+        ? await this.connection.rawQuery(query, this.whereData || [])
+        : await this.connection.query(query, this.whereData);
     if (this.command == "TRUNCATE" && this.MorphineDb.config.type == "sqlite3") {
       // remet à zéro l'autoincrement, comme le TRUNCATE de MySQL
       try {

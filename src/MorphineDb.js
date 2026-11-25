@@ -26,8 +26,9 @@ const transactionContext = new AsyncLocalStorage();
 // sont journalisées (valeurs masquées), puis levées si catchError, sinon la
 // requête rend null. Dans une transaction, une erreur est toujours levée : elle
 // doit annuler la transaction.
-function makeQuery(db, run, { alwaysThrow = false } = {}) {
+function makeQuery(db, run, { alwaysThrow = false, raw = false, inTransaction = false } = {}) {
   return async function (sql, sqlData = [], opts = {}) {
+    if (raw) refuseSessionStatement(db.config.type, sql, inTransaction);
     try {
       return await run(sql, sqlData);
     } catch (error) {
@@ -36,6 +37,69 @@ function makeQuery(db, run, { alwaysThrow = false } = {}) {
       return null;
     }
   };
+}
+
+// Instructions qui changent l'état de la connexion (transaction, variables de
+// session, base courante, verrous…). Avec un pool, cet état resterait sur une
+// connexion partagée et toucherait les requêtes suivantes d'autres utilisateurs :
+// le SQL brut les refuse, avec un message qui dit quoi faire à la place. Ce refus
+// sert la clarté ; le vrai rempart est la remise à zéro de la connexion après
+// chaque requête brute, qui ne dépend pas de la syntaxe.
+const SESSION_STATEMENTS = {
+  mysql2: [
+    "BEGIN",
+    "START",
+    "COMMIT",
+    "ROLLBACK",
+    "SAVEPOINT",
+    "RELEASE",
+    "SET",
+    "USE",
+    "LOCK",
+    "UNLOCK",
+    "XA",
+    "HANDLER",
+  ],
+  pg: [
+    "BEGIN",
+    "START",
+    "COMMIT",
+    "END",
+    "ROLLBACK",
+    "ABORT",
+    "SAVEPOINT",
+    "RELEASE",
+    "SET",
+    "RESET",
+    "LOCK",
+    "DISCARD",
+    "LISTEN",
+    "UNLISTEN",
+  ],
+  sqlite3: ["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"],
+};
+// Autorisées dans une transaction, dont elles ne débordent pas.
+const IN_TRANSACTION_OK = /^(SAVEPOINT|RELEASE|ROLLBACK\s+TO|SET\s+LOCAL|SET\s+TRANSACTION|LOCK)\b/;
+
+function refuseSessionStatement(type, sql, inTransaction) {
+  // les commentaires et parenthèses de tête ne masquent pas l'instruction
+  const head = String(sql)
+    .replace(/^(\s+|\(|\/\*[\s\S]*?\*\/|--[^\n]*(\n|$)|#[^\n]*(\n|$))+/, "")
+    .toUpperCase();
+  const word = (/^[A-Z]+/.exec(head) || [""])[0];
+  let refused = (SESSION_STATEMENTS[type] || SESSION_STATEMENTS.mysql2).includes(word);
+  // une table temporaire vit sur la connexion
+  if (!refused && type != "sqlite3" && /^CREATE\s+(GLOBAL\s+|LOCAL\s+)?TEMP(ORARY)?\b/.test(head)) {
+    refused = !inTransaction;
+  }
+  if (refused && inTransaction && IN_TRANSACTION_OK.test(head)) refused = false;
+  if (!refused) return;
+  const err = new Error(
+    `MorphineDb.query() : « ${head.split(/\s+/).slice(0, 2).join(" ")} » changerait l'état d'une connexion partagée par toute l'application, refusé. ` +
+      "Pour une transaction, utilisez MorphineDb.transaction() ; pour sql_mode ou la collation, les options sqlMode et collation de init().",
+  );
+  err.code = "E_SESSION_STATEMENT";
+  throw err;
 }
 
 // Options propres à l'ORM, à ne pas transmettre aux drivers.
@@ -106,6 +170,7 @@ const MorphineDb = new (class {
       db,
       catchError: this.config.catchError,
       query: makeQuery(this, outside),
+      rawQuery: makeQuery(this, outside, { raw: true }),
       begin: async () => {
         while (state.tx) await state.tx;
         let finish;
@@ -127,6 +192,7 @@ const MorphineDb = new (class {
         }
         return {
           query: makeQuery(this, raw, { alwaysThrow: true }),
+          rawQuery: makeQuery(this, raw, { alwaysThrow: true, raw: true, inTransaction: true }),
           commit: () => end("COMMIT"),
           rollback: () => end("ROLLBACK"),
         };
@@ -166,17 +232,57 @@ const MorphineDb = new (class {
       // ? devient $1, $2, $3…
       let i = 1;
       while (sql.indexOf("?") != -1) sql = sql.replace("?", "$" + i++);
-      const results = await target.query(sql, sqlData);
+      // protocole étendu : une seule instruction par requête, comme mysql2
+      // (sans valeurs, le protocole simple accepterait « …; DROP TABLE … »)
+      const results = await target.query({ text: sql, values: sqlData, queryMode: "extended" });
       // Comme mysql2 : le nombre de lignes touchées par une écriture,
       // non énumérable pour ne pas apparaître dans les lignes rendues par find().
       Object.defineProperty(results.rows, "affectedRows", { value: results.rowCount });
       return results.rows;
+    };
+    // Rend une connexion au pool dans l'état où elle en est sortie : annulée et
+    // détruite si elle est restée dans une transaction, sinon DISCARD ALL efface
+    // variables de session, tables temporaires, verrous consultatifs et LISTEN.
+    const cleanAndRelease = async (client) => {
+      try {
+        if (client.getTransactionStatus() != "I") {
+          await client.query("ROLLBACK").catch(() => {});
+          client.release(new Error("transaction laissée ouverte"));
+          return false;
+        }
+        await client.query("DISCARD ALL");
+        client.release();
+      } catch (e) {
+        client.release(e);
+      }
+      return true;
+    };
+    // SQL brut : sur une connexion empruntée, nettoyée avant d'être rendue.
+    const rawRun = async (sql, sqlData) => {
+      const client = await pool.connect();
+      let result, error;
+      try {
+        result = await run(client)(sql, sqlData);
+      } catch (e) {
+        error = e;
+      }
+      const clean = await cleanAndRelease(client);
+      if (error) throw error;
+      if (!clean) {
+        const err = new Error(
+          "MorphineDb.query() : la requête a laissé une transaction ouverte, elle a été annulée. Utilisez MorphineDb.transaction().",
+        );
+        err.code = "E_SESSION_STATEMENT";
+        throw err;
+      }
+      return result;
     };
     await this._checkConnection(pool, () => pool.query("SELECT 1"));
     return {
       pool,
       catchError: this.config.catchError,
       query: makeQuery(this, run(pool)),
+      rawQuery: makeQuery(this, rawRun, { raw: true }),
       begin: async () => {
         const client = await pool.connect();
         try {
@@ -188,14 +294,19 @@ const MorphineDb = new (class {
         const end = async (sql) => {
           try {
             await client.query(sql);
-            client.release();
           } catch (e) {
             client.release(e); // connexion douteuse : détruite plutôt que rendue au pool
             throw e;
           }
+          await cleanAndRelease(client);
         };
         return {
           query: makeQuery(this, run(client), { alwaysThrow: true }),
+          rawQuery: makeQuery(this, run(client), {
+            alwaysThrow: true,
+            raw: true,
+            inTransaction: true,
+          }),
           commit: () => end("COMMIT"),
           rollback: () => end("ROLLBACK"),
         };
@@ -226,19 +337,43 @@ const MorphineDb = new (class {
     if (!/^[A-Za-z0-9_]+$/.test(collation)) throw new Error(`collation invalide : ${collation}`);
     const charset = collation.split("_")[0];
     const sqlMode = this.config.sqlMode ?? "";
+    // une seule instruction : à la création de la connexion et après chaque remise à zéro
+    const sessionSql =
+      "SET SESSION sql_mode = ?, character_set_client = ?, character_set_results = ?, collation_connection = ?";
+    const sessionData = [sqlMode, charset, charset, collation];
     pool.on("connection", (conn) => {
-      const onError = (err) => {
+      conn.query(sessionSql, sessionData, (err) => {
         if (err) console.warn(clc.red("sql-error"), "réglage de la connexion MySQL :", err.message);
-      };
-      conn.query("SET SESSION sql_mode = ?", [sqlMode], onError);
-      conn.query(`SET NAMES ${charset} COLLATE ${collation}`, onError);
+      });
     });
+    // Remet la connexion à zéro (COM_RESET_CONNECTION : transaction annulée,
+    // autocommit, variables de session, tables temporaires, verrous…), réapplique
+    // nos réglages, puis la rend au pool ; détruite si quelque chose échoue.
+    const cleanAndRelease = async (conn) => {
+      try {
+        await conn.reset();
+        await conn.query(sessionSql, sessionData);
+        conn.release();
+      } catch {
+        conn.destroy();
+      }
+    };
     const run = (target) => async (sql, sqlData) => (await target.query(sql, sqlData))[0];
+    // SQL brut : sur une connexion empruntée, nettoyée avant d'être rendue.
+    const rawRun = async (sql, sqlData) => {
+      const conn = await pool.getConnection();
+      try {
+        return await run(conn)(sql, sqlData);
+      } finally {
+        await cleanAndRelease(conn);
+      }
+    };
     await this._checkConnection(pool, () => pool.query("SELECT 1"));
     return {
       pool,
       catchError: this.config.catchError,
       query: makeQuery(this, run(pool)),
+      rawQuery: makeQuery(this, rawRun, { raw: true }),
       begin: async () => {
         const conn = await pool.getConnection();
         try {
@@ -250,14 +385,19 @@ const MorphineDb = new (class {
         const end = async (fn) => {
           try {
             await fn();
-            conn.release();
           } catch (e) {
             conn.destroy(); // connexion douteuse : détruite plutôt que rendue au pool
             throw e;
           }
+          await cleanAndRelease(conn); // un SET fait pendant la transaction ne lui survit pas
         };
         return {
           query: makeQuery(this, run(conn), { alwaysThrow: true }),
+          rawQuery: makeQuery(this, run(conn), {
+            alwaysThrow: true,
+            raw: true,
+            inTransaction: true,
+          }),
           commit: () => end(() => conn.commit()),
           rollback: () => end(() => conn.rollback()),
         };
@@ -289,7 +429,7 @@ const MorphineDb = new (class {
     const connection = this.currentConnection();
     if (!connection)
       throw new Error("MorphineDb.query() : pas de connexion, init() n'a pas été appelé");
-    return await connection.query(sql, sqlData);
+    return await connection.rawQuery(sql, sqlData);
   }
 
   /**
@@ -306,8 +446,8 @@ const MorphineDb = new (class {
     const tx = await this.connection.begin();
     const store = {
       done: false,
-      connection: { query: tx.query, catchError: true },
-      api: { query: (sql, sqlData = []) => tx.query(sql, sqlData) },
+      connection: { query: tx.query, rawQuery: tx.rawQuery, catchError: true },
+      api: { query: (sql, sqlData = []) => tx.rawQuery(sql, sqlData) },
     };
     let result;
     try {
