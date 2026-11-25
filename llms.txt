@@ -1,0 +1,32 @@
+# MorphineOrm
+
+> A small ORM for Node.js (npm package `morphine-orm`) where you keep writing SQL. Models are plain JavaScript objects, conditions are SQL `WHERE` clauses with `?` placeholders (or plain objects), associations are loaded with `LEFT JOIN`s in a single query, and tables are synchronized with the models at startup. Supports MySQL / MariaDB (`mysql2`), PostgreSQL (`pg`) and SQLite (`sqlite3`). CommonJS, Node.js 20+.
+
+Key facts for writing correct code with MorphineOrm:
+
+- Install `morphine-orm` plus the driver of the database (`mysql2`, `pg` or `sqlite3`).
+- A model is a file `<ModelName>.model.js` that exports a function returning `{ tableName?, attributes, virtuals?, indexes?, checks?, hooks… }`. The model name is the file name. Every model gets `createdAt` and `updatedAt` columns (opt out with `useCreatedAt: false` / `useUpdatedAt: false`).
+- Columns are `NOT NULL` by default (`notnull: false` to allow `NULL`). A foreign key is `{ model: "Kinds", alias: "kind", onDelete: "RESTRICT" }`: it has no `type`, it takes the type of the referenced primary key.
+- Start-up: `await MorphineDb.init({ type: "mysql2", migrate: "alter", catchError: true, ...driverOptions })`, then `await loadModels("./models")`, **before** requiring the code that uses the models. Get the models with `const { Models } = require("morphine-orm"); const { Dogs } = Models;`.
+- `migrate` defaults to `"safe"` (no schema change). `"alter"` adds tables, columns, indexes and constraints but never drops anything. `"recreate"` deletes all data at each start.
+- With `catchError: false` (the default), database errors are only logged and the query returns `null` (or `[]` for a select). Use `catchError: true` to get exceptions.
+- Every query is built with chained methods and **must end with `.exec()`**: `await Dogs.find({ kindId: 1 }).populate("kind").orderBy("Dogs.name").limit(20).exec()`.
+- Methods: `find`, `findone` (row or `null`), `count`, `sum`, `avg`, `min`, `max`, `create` (returns the complete row), `createMany`, `update` (array of rows), `updateone` (one row; throws if the condition matches several), `replace`, `destroy` (number of rows), `truncate`, `drop`, `query`. Modifiers: `select`, `populate`, `populateAll`, `onetomany`, `orderBy`, `groupBy`, `having`, `limit`, `offset`, `returnRow(false)`, `debug()`. `exec(false)` returns only the id (create) or the number of affected rows (update).
+- Conditions accept a primary key (`findone(1)`), an object (`{ name: "Rex", id: [1, 2], legs: { gte: 2 }, $or: [...] }`, operators `eq ne gt gte lt lte in notIn like notLike between isNull`) or a SQL string with values (`find("kindId=? AND kind.name LIKE ?", [1, "Lab%"])`). Columns of a populated association are referenced by alias path (`kind.name`, `kind.family.name`).
+- `update(where, whereData, data)`: with an object or a primary key condition, `whereData` is omitted (`update({ kindId: 1 }, { name: "x" })`); with a SQL string it is the array of values (`update("kindId=?", [1], { name: "x" })`).
+- Security: a string condition is inserted as SQL. Never pass user input as a condition string, nor to `select`, `orderBy`, `groupBy` or `having`; use `?` placeholders or the object form. `update`, `updateone` and `destroy` refuse an empty condition.
+- Many-to-many is not automated: create a join model with two `model` attributes.
+- Transactions: `await MorphineDb.transaction(async (tx) => { ... })`; every model query started inside goes through the transaction. Raw SQL: `MorphineDb.query(sql, values)` or `tx.query(...)`; `BEGIN`, `COMMIT`, `SET`… are refused in raw queries.
+- Validation: `validator: { fn: "isEmail" }` uses the `validator` library; a failure throws an error with `code: "E_VALIDATION"` and `errors: [{ field, error, args }]`.
+- Hooks: `beforeCreate(data)`, `beforeUpdate(data)`, `beforeDestroy(where, whereData)`, `beforeTruncate()`, `beforeDrop()`, `afterCreate(row, data)`, `afterUpdate(result, data)`, `afterDestroy(count, where, whereData)`.
+- Types: `integer`, `bigint`, `float`, `decimal`, `boolean` (read as `true`/`false`), `string`, `text`, `json` (serialized and parsed automatically), `date`, `datetime`, `time`, `enum` (with `values: [...]`), `blob`, and the other MySQL types. Dates are strings (use `dateStrings: true` with `mysql2` and `pg`).
+
+## Docs
+
+- [README](https://github.com/morphine06/MorphineOrm/blob/main/README.md): the complete documentation: models, attribute options, types, validation, initialization options, conditions, CRUD, associations, transactions, hooks, raw SQL
+- [Example models](https://github.com/morphine06/MorphineOrm/tree/main/models): three linked models (`Species` → `Breeds` → `Animals`) with a foreign key, an index, a validator, a JSON column, a virtual and hooks
+
+## Optional
+
+- [Test suite](https://github.com/morphine06/MorphineOrm/blob/main/test.js): about 100 tests that show the exact behavior of each method on the three databases
+- [Benchmark](https://github.com/morphine06/MorphineOrm/blob/main/bench/README.md): MorphineOrm compared with Drizzle and Prisma on MySQL / MariaDB
