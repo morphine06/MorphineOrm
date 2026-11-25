@@ -1,0 +1,46 @@
+// Mêmes tables que les modèles d'exemple de MorphineOrm (../models)
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model Species {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(255)
+  createdAt DateTime @db.DateTime(0)
+  updatedAt DateTime @db.DateTime(0)
+  breeds    Breed[]
+
+  @@map("Species2")
+}
+
+model Breed {
+  id        Int      @id @default(autoincrement())
+  speciesId Int
+  name      String   @db.VarChar(255)
+  createdAt DateTime @db.DateTime(0)
+  updatedAt DateTime @db.DateTime(0)
+  species   Species  @relation(fields: [speciesId], references: [id])
+  animals   Animal[]
+
+  @@map("Breeds2")
+}
+
+model Animal {
+  id         Int       @id @default(autoincrement())
+  name       String    @db.VarChar(255)
+  birth      DateTime? @db.Date
+  legs       Int
+  vaccinated Int       @db.TinyInt
+  infos      String    @db.Text
+  breedId    Int
+  createdAt  DateTime  @db.DateTime(0)
+  updatedAt  DateTime  @db.DateTime(0)
+  breed      Breed     @relation(fields: [breedId], references: [id])
+
+  @@map("Animals2")
+}

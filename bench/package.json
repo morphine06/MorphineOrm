@@ -1,0 +1,18 @@
+{
+  "name": "morphine-orm-bench",
+  "private": true,
+  "type": "module",
+  "description": "Banc d'essai MorphineOrm / Drizzle / Prisma",
+  "scripts": {
+    "bench": "prisma generate && node bench.mjs"
+  },
+  "dependencies": {
+    "@prisma/adapter-mariadb": "^7.10.1",
+    "@prisma/client": "^7.10.1",
+    "drizzle-orm": "^0.45.4",
+    "mysql2": "^3.24.6"
+  },
+  "devDependencies": {
+    "prisma": "^7.10.1"
+  }
+}

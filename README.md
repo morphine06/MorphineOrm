@@ -542,6 +542,10 @@ Dogs.getAttributes(); // { id: { type: "integer", … }, name: { … }, … }
 Dogs.getAttributesEntries(); // [["id", { … }], ["name", { … }], …]
 ```
 
+## Benchmark
+
+`npm run bench` compares MorphineOrm with Drizzle and Prisma on the most frequent queries (MySQL / MariaDB). See [bench/README.md](bench/README.md) for the method and the results: MorphineOrm is as fast as or faster than both on reads and single-row writes, and Drizzle is faster on bulk inserts.
+
 ## Tests
 
 The same test suite runs against each database:
