@@ -75,7 +75,8 @@ const MorphineDb = new (class {
           try {
             let results = await this.client.query(sql, sqlData);
             // Comme mysql2 : le nombre de lignes touchées par une écriture.
-            results.rows.affectedRows = results.rowCount;
+            // non énumérable : elle ne doit pas apparaître dans les lignes rendues par find()
+            Object.defineProperty(results.rows, "affectedRows", { value: results.rowCount });
             return results.rows;
           } catch (error) {
             if (this.catchError) throw error;
@@ -735,14 +736,16 @@ const MorphineDb = new (class {
     let typeJS = "";
     let ormtype = field.type.toLowerCase();
     let ormlength = field.length;
+    // PostgreSQL : une clé primaire auto-incrémentée est un SERIAL (ou BIGSERIAL).
     if (
       this.config.type == "pg" &&
       field.primary &&
+      field.autoincrement &&
       !field.model &&
-      ormtype == "integer" &&
       info == "type"
     ) {
-      return "";
+      if (ormtype == "integer" || ormtype == "int") return "SERIAL";
+      if (ormtype == "bigint") return "BIGSERIAL";
     }
     let res = "";
     if (ormtype == "int" || ormtype == "integer") {
@@ -853,10 +856,7 @@ const MorphineDb = new (class {
   }
   _getIndex(field, isAlter = false) {
     let res = [];
-    if (!isAlter && field.primary) {
-      if (this.config.type == "pg") res.push("SERIAL UNIQUE");
-      else res.push("PRIMARY KEY");
-    }
+    if (!isAlter && field.primary) res.push("PRIMARY KEY");
     if (field.autoincrement) {
       if (this.config.type == "sqlite3") res.push("AUTOINCREMENT");
       else if (this.config.type == "pg") res.push("");
@@ -865,7 +865,7 @@ const MorphineDb = new (class {
     return " " + res.join(" ");
   }
   _getNotnull(field) {
-    if (this.config.type == "pg" && field.primary && field.type == "integer") return "";
+    if (this.config.type == "pg" && field.primary && field.autoincrement) return ""; // SERIAL
     let res;
     // if (field.notnull || typeof field.notnull == "undefined") res = " NOT NULL";
     // else res = " NULL";

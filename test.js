@@ -1,5 +1,7 @@
 require("dotenv").config({ path: ".env.local", quiet: true });
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const test = require("node:test");
 const assert = require("node:assert");
 
@@ -656,6 +658,181 @@ initApp().then(async () => {
     } finally {
       MorphineDb.connection.catchError = true;
       console.warn = warn;
+    }
+  });
+
+  await test("Requêtes sans résultat", async () => {
+    assert.deepStrictEqual(await Animals.find().exec(), []);
+    assert.deepStrictEqual(await Animals.find({ name: "Personne" }).populateAll().exec(), []);
+    assert.strictEqual(await Animals.findone({ name: "Personne" }).exec(), null);
+    assert.strictEqual(await Animals.findone(999999).populate("breed").exec(), null);
+    assert.strictEqual(await Animals.count({ name: "Personne" }).exec(), 0);
+    assert.strictEqual(await Animals.updateone(999999, { legs: 3 }).exec(), null);
+    assert.deepStrictEqual(await Animals.update({ name: "Personne" }, { legs: 3 }).exec(), []);
+    assert.strictEqual(await Animals.destroy({ name: "Personne" }).exec(), 0);
+  });
+
+  await test("populateAll() : exclusion et profondeur", async () => {
+    const {
+      animals: [rex],
+    } = await createDogs("Rex");
+    const full = await Animals.findone(rex.id).populateAll().exec();
+    assert.strictEqual(full.breed.species.name, "Dog");
+    const oneLevel = await Animals.findone(rex.id).populateAll([], 1).exec();
+    assert.strictEqual(oneLevel.breed.name, "Labrador");
+    assert.strictEqual(oneLevel.breed.species, undefined);
+    const excluded = await Animals.findone(rex.id).populateAll(["breed.species"]).exec();
+    assert.strictEqual(excluded.breed.name, "Labrador");
+    assert.strictEqual(excluded.breed.species, undefined);
+    const none = await Animals.findone(rex.id).populateAll(["breed"]).exec();
+    assert.strictEqual(none.breed, undefined);
+    // after
+    await truncateAll();
+  });
+
+  await test("count() et conditions sur un modèle lié", async () => {
+    await createDogs("Rex", "Jazz");
+    const cat = await Species.create({ name: "Cat" }).exec();
+    const siamese = await Breeds.create({ name: "Siamese", speciesId: cat.id }).exec();
+    await Animals.create({ name: "Felix", breedId: siamese.id }).exec();
+    assert.strictEqual(
+      await Animals.count("breed.name=?", ["Labrador"]).populate("breed").exec(),
+      2,
+    );
+    assert.strictEqual(
+      (await Animals.find({ "breed.name": "Siamese" }).populate("breed").exec())[0].name,
+      "Felix",
+    );
+    // after
+    await truncateAll();
+  });
+
+  await test("onetomany() : un parent sans enfant a un tableau vide", async () => {
+    const { breed } = await createDogs("Rex");
+    const empty = await Breeds.create({ name: "Chiwawa", speciesId: breed.speciesId }).exec();
+    const breeds = await Breeds.find()
+      .onetomany("Animals", "breed", "animals")
+      .orderBy("Breeds.name")
+      .exec();
+    assert.strictEqual(breeds.length, 2);
+    assert.strictEqual(breeds[0].id, empty.id);
+    assert.deepStrictEqual(breeds[0].animals, []);
+    assert.strictEqual(breeds[1].animals.length, 1);
+    assert.strictEqual(breeds[1].animals[0].name, "Rex");
+    // after
+    await truncateAll();
+  });
+
+  await test("updateone().populate() renvoie la ligne et ses modèles liés", async () => {
+    const {
+      animals: [rex],
+    } = await createDogs("Rex");
+    const back = await Animals.updateone(rex.id, { legs: 3 })
+      .populate("breed")
+      .populate("breed.species")
+      .exec();
+    assert.strictEqual(back.legs, 3);
+    assert.strictEqual(back.breed.species.name, "Dog");
+    // after
+    await truncateAll();
+  });
+
+  await test("Clés inconnues ignorées, json reçu en chaîne", async () => {
+    const { breed } = await createDogs();
+    const rex = await Animals.create({
+      name: "Rex",
+      breedId: breed.id,
+      inconnu: "x",
+      infos: '{"color":"black"}',
+    }).exec();
+    assert.strictEqual(rex.inconnu, undefined);
+    assert.deepStrictEqual(rex.infos, { color: "black" });
+    const back = await Animals.updateone(rex.id, { inconnu: "y", legs: 5 }).exec();
+    assert.strictEqual(back.legs, 5);
+    assert.strictEqual(back.inconnu, undefined);
+    // after
+    await truncateAll();
+  });
+
+  await test("Créations en parallèle", async () => {
+    const { breed } = await createDogs();
+    const names = Array.from({ length: 20 }, (_, i) => `Chien ${i}`);
+    const created = await Promise.all(
+      names.map((name) => Animals.create({ name, breedId: breed.id }).exec()),
+    );
+    assert.strictEqual(new Set(created.map((a) => a.id)).size, 20);
+    assert.deepStrictEqual(created.map((a) => a.name).sort(), [...names].sort());
+    assert.strictEqual(await Animals.count().exec(), 20);
+    // after
+    await truncateAll();
+  });
+
+  await test("debug() journalise la requête", async () => {
+    const warn = console.warn;
+    const logged = [];
+    console.warn = (...args) => logged.push(args.join(" "));
+    try {
+      await Species.find({ name: "Dog" }).debug().exec();
+    } finally {
+      console.warn = warn;
+    }
+    assert.ok(logged.some((l) => l.includes("SELECT") && l.includes("Dog")));
+  });
+
+  await test("Validator : règle inconnue, null non vérifié", async () => {
+    const { breed } = await createDogs();
+    const rule = Animals.def.attributes.name.validator;
+    try {
+      Animals.def.attributes.name.validator = { fn: "isInexistant" };
+      await assert.rejects(Animals.create({ name: "Rex", breedId: breed.id }).exec(), /inconnu/);
+    } finally {
+      Animals.def.attributes.name.validator = rule;
+    }
+    const anonymous = await Animals.create({ name: null, breedId: breed.id }).exec();
+    assert.strictEqual(anonymous.name, "");
+    // after
+    await truncateAll();
+  });
+
+  await test("loadModels(dir) : sous-dossier, table par défaut, clé texte, sans dates", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "morphine-models-"));
+    fs.mkdirSync(path.join(dir, "geo"));
+    fs.writeFileSync(
+      path.join(dir, "geo", "Countries.model.js"),
+      `module.exports = function () {
+        return {
+          useCreatedAt: false,
+          useUpdatedAt: false,
+          attributes: {
+            code: { type: "char", length: 2, primary: true },
+            label: { type: "string", defaultsTo: "" },
+          },
+        };
+      };`,
+    );
+    try {
+      await loadModels(dir);
+      const { Countries } = Models;
+      assert.ok(Countries);
+      assert.strictEqual(Countries.def.tableName, "Countries");
+      assert.strictEqual(Countries.getPrimary(), "code");
+      assert.strictEqual(Countries.getAttributes().createdAt, undefined);
+      const fr = await Countries.create({ code: "FR", label: "France" }).exec();
+      assert.deepStrictEqual(fr, { code: "FR", label: "France" });
+      await Countries.create({ code: "IT", label: "Italie" }).exec();
+      const it = await Countries.updateone({ code: "IT" }, { label: "Italia" }).exec();
+      assert.strictEqual(it.label, "Italia");
+      assert.strictEqual(await Countries.destroy({ code: "FR" }).exec(), 1);
+      assert.strictEqual(await Countries.count().exec(), 1);
+    } finally {
+      if (Models.Countries) {
+        try {
+          await Models.Countries.drop().exec();
+        } finally {
+          delete Models.Countries;
+        }
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

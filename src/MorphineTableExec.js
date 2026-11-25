@@ -650,14 +650,16 @@ class MorphineTableExec {
       this.joinModels.forEach((model) => {
         if (!model.isOneToMany) return;
         rows.forEach((row) => {
-          const f = rowsOk.find((r) => r[primaryField] === row[primaryField]);
+          // LEFT JOIN : un parent sans enfant arrive avec un enfant null
+          const child = row[model.origin];
+          let f = rowsOk.find((r) => r[primaryField] === row[primaryField]);
           if (!f) {
-            row[model.fieldJoinName] = [row[model.origin]];
-            rowsOk.push(row);
-            delete row[model.origin];
-          } else {
-            f[model.fieldJoinName].push(row[model.origin]);
+            f = row;
+            f[model.fieldJoinName] = [];
+            rowsOk.push(f);
           }
+          delete row[model.origin];
+          if (child) f[model.fieldJoinName].push(child);
         });
       });
       return rowsOk;
@@ -842,8 +844,9 @@ class MorphineTableExec {
         res = rows.affectedRows;
         break;
       case "INSERT":
-        if (this.MorphineDb.config.type == "sqlite3") {
-          res = rows.insertId;
+        if (!(this.table.primaryField && this.table.primaryField.autoincrement)) {
+          // clé fournie par l'appelant : SQLite rendrait son rowid, MySQL 0
+          res = this.data[this.primary];
         } else if (this.MorphineDb.config.type == "pg") {
           res = rows[0][this.primary];
         } else {
@@ -875,7 +878,8 @@ class MorphineTableExec {
       if (this.logQuery) tableToExec.debug();
       this.originalPopulate.forEach((fieldJoin) => tableToExec.populate(fieldJoin));
       let rows2 = await tableToExec.exec();
-      return this.onlyOne && this.command === "UPDATE" ? rows2[0] : rows2;
+      // updateone() d'une ligne inexistante : null, comme findone()
+      return this.onlyOne && this.command === "UPDATE" ? (rows2[0] ?? null) : rows2;
     }
     return res;
   }
